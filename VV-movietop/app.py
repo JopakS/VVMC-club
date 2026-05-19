@@ -263,104 +263,133 @@ if not st.session_state["logged_in"]:
         st.write("<div style='text-align: center; margin: 15px 0; color: #64748b;'>или</div>", unsafe_allow_html=True)
         
         components.html(
-            """
-            <div id="btn-container" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 75px;">
-                <button id="tg-login-btn" style="
-                    background-color: #24A1DE; 
-                    color: white; 
-                    border: none; 
-                    border-radius: 10px; 
-                    padding: 12px 24px; 
-                    font-weight: bold; 
-                    font-size: 16px;
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; 
-                    cursor: pointer; 
-                    display: inline-flex; 
-                    align-items: center; 
-                    gap: 10px; 
-                    width: 100%; 
-                    max-width: 320px;
-                    justify-content: center; 
-                    box-shadow: 0 4px 15px rgba(36, 161, 222, 0.4);
-                    transition: all 0.2s ease;
-                ">
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="m22 2-7 20-4-9-9-4Z"></path>
-                        <path d="M22 2 11 13"></path>
-                    </svg>
-                    Войти через Telegram
-                </button>
-                <div id="status" style="color: #ef4444; margin-top: 10px; font-family: sans-serif; font-size: 13px; font-weight: 500;"></div>
-            </div>
+    """
+    <div id="btn-container" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 75px;">
+        <button id="tg-login-btn" style="
+            background-color: #24A1DE; 
+            color: white; 
+            border: none; 
+            border-radius: 10px; 
+            padding: 12px 24px; 
+            font-weight: bold; 
+            font-size: 16px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; 
+            cursor: pointer; 
+            display: inline-flex; 
+            align-items: center; 
+            gap: 10px; 
+            width: 100%; 
+            max-width: 320px;
+            justify-content: center; 
+            box-shadow: 0 4px 15px rgba(36, 161, 222, 0.4);
+            transition: all 0.2s ease;
+        ">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="m22 2-7 20-4-9-9-4Z"></path>
+                <path d="M22 2 11 13"></path>
+            </svg>
+            Войти через Telegram
+        </button>
+        <div id="status" style="color: #ef4444; margin-top: 10px; font-family: sans-serif; font-size: 13px; font-weight: 500;"></div>
+    </div>
 
-            <script>
-                // Попытка динамически загрузить скрипт SDK Telegram
+    <script>
+        const btn = document.getElementById('tg-login-btn');
+        const statusDiv = document.getElementById('status');
+
+        function parseTelegramUser() {
+            // Пробуем получить данные из URL параметров (tgWebAppData)
+            const urlParams = new URLSearchParams(window.location.search);
+            const tgWebAppData = urlParams.get('tgWebAppData');
+            
+            if (tgWebAppData) {
                 try {
-                    if (!window.parent.Telegram) {
-                        const script = window.parent.document.createElement('script');
-                        script.src = 'https://telegram.org/js/telegram-web-app.js';
-                        window.parent.document.head.appendChild(script);
+                    // Декодируем URL-encoded строку
+                    const decoded = decodeURIComponent(tgWebAppData);
+                    const userParams = new URLSearchParams(decoded);
+                    const userJson = userParams.get('user');
+                    
+                    if (userJson) {
+                        const user = JSON.parse(decodeURIComponent(userJson));
+                        return user.username || user.first_name || `user_${user.id}`;
                     }
                 } catch (e) {
-                    if (!window.Telegram) {
-                        const script = document.createElement('script');
-                        script.src = 'https://telegram.org/js/telegram-web-app.js';
-                        document.head.appendChild(script);
-                    }
+                    console.error('Ошибка парсинга tgWebAppData:', e);
                 }
+            }
+            
+            // Запасной вариант: пробуем через Telegram.WebApp API
+            try {
+                const tg = window.Telegram?.WebApp;
+                if (tg && tg.initDataUnsafe?.user) {
+                    const user = tg.initDataUnsafe.user;
+                    return user.username || user.first_name || 'tg_user';
+                }
+            } catch (e) {
+                console.error('Ошибка доступа к Telegram API:', e);
+            }
+            
+            return null;
+        }
 
-                const btn = document.getElementById('tg-login-btn');
-                const statusDiv = document.getElementById('status');
-
-                btn.addEventListener('click', () => {
-                    btn.disabled = true;
-                    btn.style.opacity = '0.7';
-                    statusDiv.innerText = "Инициализация профиля...";
+        btn.addEventListener('click', () => {
+            btn.disabled = true;
+            btn.style.opacity = '0.7';
+            statusDiv.innerText = "Авторизация...";
+            
+            const username = parseTelegramUser();
+            
+            if (username) {
+                try {
+                    // Используем текущий URL без попыток доступа к parent
+                    const currentUrl = new URL(window.location.href);
                     
-                    try {
-                        const tg = (window.parent && window.parent.Telegram) || window.Telegram;
-                        if (tg && tg.WebApp && tg.WebApp.initDataUnsafe) {
-                            tg.WebApp.ready();
-                            tg.WebApp.expand();
+                    // Очищаем параметры Telegram и добавляем нужные
+                    currentUrl.search = '';
+                    currentUrl.searchParams.set('tg_user', username);
+                    currentUrl.searchParams.set('tg_ref', 'telegram');
+                    
+                    statusDiv.style.color = '#10b981';
+                    statusDiv.innerText = 'Успешная авторизация! Перенаправление...';
+                    
+                    // Перенаправляем на тот же URL, но с нужными параметрами
+                    window.location.replace(currentUrl.href);
+                } catch (err) {
+                    btn.disabled = false;
+                    btn.style.opacity = '1';
+                    statusDiv.innerText = 'Ошибка: ' + err.message;
+                }
+            } else {
+                btn.disabled = false;
+                btn.style.opacity = '1';
+                statusDiv.innerText = 'Ошибка: Не удалось получить данные пользователя. Откройте приложение через Telegram Mini App.';
+            }
+        });
 
-                            const user = tg.WebApp.initDataUnsafe.user;
-                            if (user) {
-                                const username = user.username || user.first_name || "tg_user";
-                                
-                                let parentUrl;
-                                try {
-                                    parentUrl = new URL(window.parent.location.href);
-                                } catch (corsErr) {
-                                    parentUrl = new URL(document.referrer || window.location.href);
-                                }
-
-                                parentUrl.searchParams.set("tg_user", username);
-                                parentUrl.searchParams.set("tg_ref", "telegram");
-                                
-                                statusDiv.style.color = "#10b981";
-                                statusDiv.innerText = "Успешная авторизация! Перенаправление...";
-                                window.parent.location.replace(parentUrl.href);
-                            } else {
-                                btn.disabled = false;
-                                btn.style.opacity = '1';
-                                statusDiv.innerText = "Ошибка: Запустите приложение из Telegram!";
-                            }
-                        } else {
-                            btn.disabled = false;
-                            btn.style.opacity = '1';
-                            statusDiv.innerText = "Ошибка: Telegram WebApp не обнаружен!";
-                        }
-                    } catch (err) {
-                        btn.disabled = false;
-                        btn.style.opacity = '1';
-                        statusDiv.innerText = "Сбой соединения с Telegram: " + err.message;
-                    }
-                });
-            </script>
-            """,
-            height=100,
-        )
-    st.stop()
+        // Автоматический вход при загрузке страницы в Telegram Mini App
+        window.addEventListener('load', () => {
+            const username = parseTelegramUser();
+            if (username) {
+                const currentUrl = new URL(window.location.href);
+                
+                // Проверяем, не вошли ли уже
+                if (!currentUrl.searchParams.get('tg_user')) {
+                    currentUrl.search = '';
+                    currentUrl.searchParams.set('tg_user', username);
+                    currentUrl.searchParams.set('tg_ref', 'telegram');
+                    
+                    statusDiv.style.color = '#10b981';
+                    statusDiv.innerText = 'Автоматический вход...';
+                    
+                    window.location.replace(currentUrl.href);
+                }
+            }
+        });
+    </script>
+    """,
+    height=100,
+)
+st.stop()
 
 # ----------------- ОСНОВНОЙ ИНТЕРФЕЙС ПРИЛОЖЕНИЯ -----------------
 
