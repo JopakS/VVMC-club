@@ -875,5 +875,3 @@ with tab_rating:
                     st.caption(f"Голосов: {item['Голосов']}")
         else:
             st.info("Ни один фильм еще не оценен.")
-        else:
-            st.info("Ни один фильм еще не оценен.")
