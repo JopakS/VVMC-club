@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import sqlite3
+import io
 
 # Настройки страницы для расширения границ интерфейса (Широкий экран)
 st.set_page_config(
@@ -16,9 +17,126 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ----------------- БАЗА ДАННЫХ SQLITE -----------------
+# ----------------- РЕЗЕРВНОЕ КОПИРОВАНИЕ НА GOOGLE DRIVE -----------------
+# Для работы интеграции вам понадобятся библиотеки: google-api-python-client и google-auth
+# Добавьте их в ваш requirements.txt:
+# google-api-python-client
+# google-auth
+#
+# Настройки secrets для Google Drive (добавьте в Streamlit Cloud -> Settings -> Secrets):
+# [gdrive]
+# folder_id = "ID_ПАПКИ_НА_ВАШЕМ_ГУГЛ_ДИСКЕ"
+# [gdrive.service_account]
+# type = "service_account"
+# project_id = "..."
+# private_key_id = "..."
+# private_key = "..."
+# client_email = "..."
+# ... (все остальные поля из скачанного JSON-файла ключа сервисного аккаунта)
+
 DB_FILE = "vvmc_club.db"
 BG_DIR = "backgrounds"
+
+def get_gdrive_service():
+    """Авторизует и возвращает клиент Google Drive API."""
+    if "gdrive" in st.secrets and "service_account" in st.secrets["gdrive"]:
+        try:
+            from google.oauth2 import service_account
+            from googleapiclient.discovery import build
+            
+            # Загружаем учетные данные из secrets
+            creds_info = dict(st.secrets["gdrive"]["service_account"])
+            # Обрабатываем возможные проблемы со спецсимволами переноса строки в приватном ключе
+            if "private_key" in creds_info:
+                creds_info["private_key"] = creds_info["private_key"].replace("\\n", "\n")
+                
+            creds = service_account.Credentials.from_service_account_info(
+                creds_info, 
+                scopes=["https://www.googleapis.com/auth/drive"]
+            )
+            return build('drive', 'v3', credentials=creds)
+        except Exception as e:
+            st.sidebar.error(f"Ошибка авторизации Google Drive: {e}")
+    return None
+
+def find_db_on_gdrive(service, folder_id):
+    """Ищет файл базы данных в указанной папке Google Drive."""
+    try:
+        query = f"name = '{DB_FILE}' and '{folder_id}' in parents and trashed = false"
+        results = service.files().list(
+            q=query, 
+            spaces='drive', 
+            fields='files(id, name)'
+        ).execute()
+        files = results.get('files', [])
+        if files:
+            return files[0]['id']
+    except Exception as e:
+        st.sidebar.error(f"Ошибка поиска файла на Google Диске: {e}")
+    return None
+
+def download_db_from_cloud():
+    """Загружает базу данных из Google Drive при старте приложения."""
+    service = get_gdrive_service()
+    if service and "gdrive" in st.secrets:
+        folder_id = st.secrets["gdrive"].get("folder_id")
+        if not folder_id:
+            st.sidebar.warning("⚠️ Не указан folder_id в secrets[gdrive]!")
+            return
+            
+        file_id = find_db_on_gdrive(service, folder_id)
+        if file_id:
+            try:
+                from googleapiclient.http import MediaIoBaseDownload
+                request = service.files().get_media(fileId=file_id)
+                fh = io.BytesIO()
+                downloader = MediaIoBaseDownload(fh, request)
+                done = False
+                while not done:
+                    status, done = downloader.next_chunk()
+                
+                with open(DB_FILE, "wb") as f:
+                    f.write(fh.getvalue())
+                st.sidebar.success("🔄 База успешно скачана с Google Диска!")
+            except Exception as e:
+                st.sidebar.error(f"Ошибка скачивания базы с Google Диска: {e}")
+        else:
+            st.sidebar.info("Файл базы данных не найден на Google Диске. Будет создан новый при изменениях.")
+
+def upload_db_to_cloud():
+    """Загружает (или обновляет) локальную базу данных на Google Drive."""
+    service = get_gdrive_service()
+    if service and "gdrive" in st.secrets and os.path.exists(DB_FILE):
+        folder_id = st.secrets["gdrive"].get("folder_id")
+        if not folder_id:
+            return
+            
+        from googleapiclient.http import MediaFileUpload
+        file_id = find_db_on_gdrive(service, folder_id)
+        media = MediaFileUpload(DB_FILE, mimetype='application/x-sqlite3', resumable=True)
+        
+        try:
+            if file_id:
+                # Если файл уже существует, обновляем его содержимое
+                service.files().update(
+                    fileId=file_id,
+                    media_body=media
+                ).execute()
+            else:
+                # Если файла нет, создаем новый в указанной папке
+                file_metadata = {
+                    'name': DB_FILE,
+                    'parents': [folder_id]
+                }
+                service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields='id'
+                ).execute()
+        except Exception as e:
+            st.sidebar.error(f"Не удалось сохранить бэкап на Google Диск: {e}")
+
+# ----------------- БАЗА ДАННЫХ SQLITE -----------------
 
 def get_db_conn():
     """Создает и возвращает подключение к базе данных SQLite."""
@@ -29,6 +147,11 @@ def get_db_conn():
 
 def init_db():
     """Инициализация таблиц базы данных."""
+    # Пытаемся сначала скачать актуальную копию из Google Диска
+    if "db_downloaded" not in st.session_state:
+        download_db_from_cloud()
+        st.session_state["db_downloaded"] = True
+
     with get_db_conn() as conn:
         conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
@@ -71,9 +194,10 @@ def add_user(username, password, is_telegram=0):
         conn.execute('INSERT OR REPLACE INTO users (username, password, is_telegram) VALUES (?, ?, ?)',
                      (username, password, is_telegram))
         conn.commit()
+    upload_db_to_cloud() # Синхронизируем изменения с Google Диском
 
 def get_movies():
-    """Возвращает список фильмов со словарем оценок (совместимо со старой структурой)."""
+    """Возвращает список фильмов со словарем оценок."""
     movies_list = []
     with get_db_conn() as conn:
         m_rows = conn.execute('SELECT * FROM movies').fetchall()
@@ -96,17 +220,21 @@ def add_movie(title, poster, status, added_by):
         cursor.execute('INSERT INTO movies (title, poster, status, added_by) VALUES (?, ?, ?, ?)',
                        (title, poster, status, added_by))
         conn.commit()
-        return cursor.lastrowid
+        last_id = cursor.lastrowid
+    upload_db_to_cloud() # Синхронизируем изменения с Google Диском
+    return last_id
 
 def update_movie_status(movie_id, status):
     with get_db_conn() as conn:
         conn.execute('UPDATE movies SET status = ? WHERE id = ?', (status, movie_id))
         conn.commit()
+    upload_db_to_cloud() # Синхронизируем изменения с Google Диском
 
 def delete_movie(movie_id):
     with get_db_conn() as conn:
         conn.execute('DELETE FROM movies WHERE id = ?', (movie_id,))
         conn.commit()
+    upload_db_to_cloud() # Синхронизируем изменения с Google Диском
 
 def set_rating(movie_id, username, score, quip, date):
     with get_db_conn() as conn:
@@ -119,6 +247,7 @@ def set_rating(movie_id, username, score, quip, date):
                 rating_date=excluded.rating_date
         ''', (movie_id, username, score, quip, date))
         conn.commit()
+    upload_db_to_cloud() # Синхронизируем изменения с Google Диском
 
 # --- Миграция со старых JSON ---
 def migrate_json_to_sqlite():
@@ -148,7 +277,8 @@ def migrate_json_to_sqlite():
             except Exception: pass
             
         with open("migrated.flag", "w") as f:
-            f.write("Данные перенесены в SQLite. Не удаляйте этот файл.")
+            f.write("Данные перенесены в SQLite.")
+        upload_db_to_cloud()
 
 # Инициализация и миграция баз данных
 init_db()
@@ -229,7 +359,7 @@ if not st.session_state["logged_in"]:
     </div>
     """, unsafe_allow_html=True)
     
-    col_login, _ = st.columns([2, 1])
+    col_login, col_info_box = st.columns([2, 1])
     with col_login:
         with st.form("login_form"):
             st.subheader("Вход в киноклуб")
@@ -259,107 +389,99 @@ if not st.session_state["logged_in"]:
                     st.success(f"🎉 Аккаунт '{u}' успешно создан!")
                     st.rerun()
                     
-        # --- СТИЛЬНАЯ КНОПКА LOGIN VIA TELEGRAM ---
+        # --- ИНТЕГРАЦИЯ С ТЕЛЕГРАМ-БОТОМ И WEBAPP ---
         st.write("<div style='text-align: center; margin: 15px 0; color: #64748b;'>или</div>", unsafe_allow_html=True)
         
-        components.html(
-            """
-            <div id="btn-container" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 75px;">
-                <button id="tg-login-btn" style="
-                    background-color: #24A1DE; 
+        # Получаем имя бота из secrets для построения прямой ссылки
+        bot_username = st.secrets.get("TELEGRAM_BOT_USERNAME", "vvmc_club_bot")
+        
+        # Добавляем две опции: официальный виджет входа И запуск через WebApp-бота.
+        st.markdown(f"""
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 12px; margin-bottom: 20px;">
+            <a href="https://t.me/{bot_username}" target="_blank" style="text-decoration: none; width: 100%; max-width: 320px;">
+                <div style="
+                    background: linear-gradient(135deg, #24A1DE 0%, #1d82b2 100%); 
                     color: white; 
-                    border: none; 
                     border-radius: 10px; 
-                    padding: 12px 24px; 
+                    padding: 12px; 
                     font-weight: bold; 
-                    font-size: 16px;
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; 
-                    cursor: pointer; 
-                    display: inline-flex; 
-                    align-items: center; 
-                    gap: 10px; 
-                    width: 100%; 
-                    max-width: 320px;
-                    justify-content: center; 
-                    box-shadow: 0 4px 15px rgba(36, 161, 222, 0.4);
-                    transition: all 0.2s ease;
+                    text-align: center;
+                    font-family: sans-serif;
+                    box-shadow: 0 4px 15px rgba(36, 161, 222, 0.3);
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    gap: 10px;
                 ">
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                         <path d="m22 2-7 20-4-9-9-4Z"></path>
                         <path d="M22 2 11 13"></path>
                     </svg>
-                    Войти через Telegram
-                </button>
-                <div id="status" style="color: #ef4444; margin-top: 10px; font-family: sans-serif; font-size: 13px; font-weight: 500;"></div>
+                    Открыть WebApp в Telegram Боте
+                </div>
+            </a>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Компонент для сбора WebApp данных, если пользователь вошел непосредственно внутри фрейма Telegram
+        components.html(
+            """
+            <div id="btn-container" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 60px;">
+                <div id="status" style="color: #94a3b8; font-family: sans-serif; font-size: 13px; font-weight: 500;">Проверка Telegram WebApp окружения...</div>
             </div>
 
             <script>
-                // Попытка динамически загрузить скрипт SDK Telegram
-                try {
-                    if (!window.parent.Telegram) {
-                        const script = window.parent.document.createElement('script');
-                        script.src = 'https://telegram.org/js/telegram-web-app.js';
-                        window.parent.document.head.appendChild(script);
-                    }
-                } catch (e) {
-                    if (!window.Telegram) {
-                        const script = document.createElement('script');
-                        script.src = 'https://telegram.org/js/telegram-web-app.js';
-                        document.head.appendChild(script);
-                    }
-                }
-
-                const btn = document.getElementById('tg-login-btn');
-                const statusDiv = document.getElementById('status');
-
-                btn.addEventListener('click', () => {
-                    btn.disabled = true;
-                    btn.style.opacity = '0.7';
-                    statusDiv.innerText = "Инициализация профиля...";
-                    
+                function initTelegram() {
                     try {
                         const tg = (window.parent && window.parent.Telegram) || window.Telegram;
-                        if (tg && tg.WebApp && tg.WebApp.initDataUnsafe) {
+                        const statusDiv = document.getElementById('status');
+                        
+                        if (tg && tg.WebApp && tg.WebApp.initDataUnsafe && tg.WebApp.initDataUnsafe.user) {
                             tg.WebApp.ready();
                             tg.WebApp.expand();
-
+                            
                             const user = tg.WebApp.initDataUnsafe.user;
-                            if (user) {
-                                const username = user.username || user.first_name || "tg_user";
-                                
-                                let parentUrl;
-                                try {
-                                    parentUrl = new URL(window.parent.location.href);
-                                } catch (corsErr) {
-                                    parentUrl = new URL(document.referrer || window.location.href);
-                                }
-
-                                parentUrl.searchParams.set("tg_user", username);
-                                parentUrl.searchParams.set("tg_ref", "telegram");
-                                
-                                statusDiv.style.color = "#10b981";
-                                statusDiv.innerText = "Успешная авторизация! Перенаправление...";
-                                window.parent.location.replace(parentUrl.href);
-                            } else {
-                                btn.disabled = false;
-                                btn.style.opacity = '1';
-                                statusDiv.innerText = "Ошибка: Запустите приложение из Telegram!";
+                            const username = user.username || user.first_name || "tg_user";
+                            
+                            let parentUrl;
+                            try {
+                                parentUrl = new URL(window.parent.location.href);
+                            } catch (corsErr) {
+                                parentUrl = new URL(document.referrer || window.location.href);
                             }
+
+                            parentUrl.searchParams.set("tg_user", username);
+                            parentUrl.searchParams.set("tg_ref", "telegram");
+                            
+                            statusDiv.style.color = "#10b981";
+                            statusDiv.innerText = "Авторизация пройдена! Перенаправление...";
+                            window.parent.location.replace(parentUrl.href);
                         } else {
-                            btn.disabled = false;
-                            btn.style.opacity = '1';
-                            statusDiv.innerText = "Ошибка: Telegram WebApp не обнаружен!";
+                            statusDiv.innerText = "Запустите приложение из Telegram для авто-входа";
                         }
                     } catch (err) {
-                        btn.disabled = false;
-                        btn.style.opacity = '1';
-                        statusDiv.innerText = "Сбой соединения с Telegram: " + err.message;
+                        document.getElementById('status').innerText = "";
                     }
-                });
+                }
+                
+                // Запуск проверки с задержкой для загрузки скрипта Telegram
+                setTimeout(initTelegram, 500);
             </script>
             """,
-            height=100,
+            height=60,
         )
+
+    with col_info_box:
+        st.markdown("""
+        <div style="background-color: #0f172a; border: 1px solid #1e293b; border-radius: 12px; padding: 15px;">
+            <h4 style="margin-top:0; color:#14b8a6 !important;">💡 Как войти через Telegram?</h4>
+            <ol style="color:#94a3b8; font-size:0.9em; padding-left:20px;">
+                <li style="margin-bottom:8px;">Найдите нашего бота в Telegram и запустите его.</li>
+                <li style="margin-bottom:8px;">Нажмите кнопку "Открыть Клуб" внутри бота.</li>
+                <li style="margin-bottom:8px;">Приложение автоматически распознает ваш аккаунт и выполнит вход без пароля!</li>
+            </ol>
+        </div>
+        """, unsafe_allow_html=True)
     st.stop()
 
 # ----------------- ОСНОВНОЙ ИНТЕРФЕЙС ПРИЛОЖЕНИЯ -----------------
@@ -665,7 +787,6 @@ with tab_add:
                         
                         with col_card_img:
                             if poster_url:
-                                East_url = poster_url
                                 st.image(poster_url, use_container_width=True)
                             else:
                                 st.write("Нет постера")
@@ -752,5 +873,7 @@ with tab_rating:
                     if item["Постер"]:
                         st.image(item["Постер"], use_container_width=True)
                     st.caption(f"Голосов: {item['Голосов']}")
+        else:
+            st.info("Ни один фильм еще не оценен.")
         else:
             st.info("Ни один фильм еще не оценен.")
