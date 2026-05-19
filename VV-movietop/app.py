@@ -21,6 +21,25 @@ st.set_page_config(
 DB_FILE = "vvmc_club.db"
 BG_DIR = "backgrounds"
 
+def clean_folder_id(folder_id_str):
+    """
+    Очищает ID папки Google Диска.
+    Если пользователь случайно скопировал полную ссылку на папку (например, с ?hl=ru или ?usp=sharing),
+    функция автоматически извлечет из нее чистый ID.
+    """
+    if not folder_id_str:
+        return ""
+    folder_id_str = folder_id_str.strip().strip("'").strip('"')
+    # Если вставили полную ссылку на папку Google Drive
+    if "drive.google.com" in folder_id_str or "folders/" in folder_id_str:
+        parts = folder_id_str.split("folders/")
+        if len(parts) > 1:
+            folder_id_str = parts[1]
+    # Отсекаем GET-параметры (например, ?usp=sharing или ?hl=ru)
+    if "?" in folder_id_str:
+        folder_id_str = folder_id_str.split("?")[0]
+    return folder_id_str.strip()
+
 def clean_private_key(key_str):
     """Очищает и форматирует приватный ключ Google Service Account."""
     if not key_str:
@@ -63,7 +82,8 @@ def get_gdrive_service():
 def find_db_on_gdrive(service, folder_id):
     """Ищет файл базы данных в указанной папке Google Drive."""
     try:
-        query = f"name = '{DB_FILE}' and '{folder_id}' in parents and trashed = false"
+        clean_id = clean_folder_id(folder_id)
+        query = f"name = '{DB_FILE}' and '{clean_id}' in parents and trashed = false"
         results = service.files().list(
             q=query, 
             spaces='drive', 
@@ -80,11 +100,12 @@ def download_db_from_cloud():
     """Загружает базу данных из Google Drive при старте приложения."""
     service = get_gdrive_service()
     if service and "gdrive" in st.secrets:
-        folder_id = st.secrets["gdrive"].get("folder_id")
-        if not folder_id:
+        raw_folder_id = st.secrets["gdrive"].get("folder_id")
+        if not raw_folder_id:
             st.sidebar.warning("⚠️ Не указан folder_id в secrets[gdrive]!")
             return
             
+        folder_id = clean_folder_id(raw_folder_id)
         file_id = find_db_on_gdrive(service, folder_id)
         if file_id:
             try:
@@ -108,10 +129,11 @@ def upload_db_to_cloud():
     """Загружает (или обновляет) локальную базу данных на Google Drive."""
     service = get_gdrive_service()
     if service and "gdrive" in st.secrets and os.path.exists(DB_FILE):
-        folder_id = st.secrets["gdrive"].get("folder_id")
-        if not folder_id:
+        raw_folder_id = st.secrets["gdrive"].get("folder_id")
+        if not raw_folder_id:
             return
             
+        folder_id = clean_folder_id(raw_folder_id)
         from googleapiclient.http import MediaFileUpload
         file_id = find_db_on_gdrive(service, folder_id)
         media = MediaFileUpload(DB_FILE, mimetype='application/x-sqlite3', resumable=True)
@@ -353,6 +375,43 @@ if not st.session_state["logged_in"] and "tg_user" in query_params:
 
 # Экран логина (для обычных браузеров и ручного выбора)
 if not st.session_state["logged_in"]:
+    # --- БЕСШОВНЫЙ АВТОПЕРЕХВАТЧИК TELEGRAM WEBAPP НА ГЛАВНОМ ОКНЕ ---
+    # Этот скрипт внедряется прямо в основное окно (не в iframe!) и мгновенно
+    # перенаправляет пользователя на правильный URL с параметрами при входе из Telegram.
+    st.markdown("""
+    <svg onload="
+        (function(){
+            try {
+                let rawData = '';
+                if (window.location.hash && window.location.hash.includes('tgWebAppData')) {
+                    rawData = window.location.hash.substring(1);
+                } else if (window.location.search && window.location.search.includes('tgWebAppData')) {
+                    rawData = window.location.search.substring(1);
+                }
+                if (rawData) {
+                    const params = new URLSearchParams(rawData);
+                    const webAppData = params.get('tgWebAppData');
+                    if (webAppData) {
+                        const subParams = new URLSearchParams(webAppData);
+                        const userJson = subParams.get('user');
+                        if (userJson) {
+                            const user = JSON.parse(userJson);
+                            const username = user.username || user.first_name || 'tg_user';
+                            const currentUrl = new URL(window.location.href);
+                            if (currentUrl.searchParams.get('tg_user') !== username) {
+                                currentUrl.searchParams.set('tg_user', username);
+                                currentUrl.searchParams.set('tg_ref', 'telegram');
+                                currentUrl.hash = ''; // Очищаем хэш, чтобы избежать цикла редиректов
+                                window.top.location.href = currentUrl.href;
+                            }
+                        }
+                    }
+                }
+            } catch(e) { console.error('Telegram Redirect Error:', e); }
+        })()
+    " style="display:none;"></svg>
+    """, unsafe_allow_html=True)
+
     st.markdown("""
     <div style="text-align: center; margin-bottom: 25px;">
         <h1 class="vvmc-title">🎬 VVMC CLUB</h1>
@@ -617,7 +676,8 @@ with st.sidebar:
             db_size_kb = os.path.getsize(DB_FILE) / 1024 if os.path.exists(DB_FILE) else 0
             st.markdown(f"<div style='color: #cbd5e1; font-size: 0.85em;'>Локальная БД: <b>{db_size_kb:.1f} KB</b></div>", unsafe_allow_html=True)
             
-            folder_id = st.secrets["gdrive"].get("folder_id")
+            raw_folder_id = st.secrets["gdrive"].get("folder_id")
+            folder_id = clean_folder_id(raw_folder_id)
             cloud_file_id = find_db_on_gdrive(gdrive_service, folder_id)
             if cloud_file_id:
                 st.markdown(f"<div style='color: #10b981; font-size: 0.85em;'>Файл в облаке: <b>Найден ✓</b><br><span style='color: #64748b; font-size: 0.8em;'>ID: ...{cloud_file_id[-8:]}</span></div>", unsafe_allow_html=True)
