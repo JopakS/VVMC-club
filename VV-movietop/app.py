@@ -21,6 +21,24 @@ st.set_page_config(
 DB_FILE = "vvmc_club.db"
 BG_DIR = "backgrounds"
 
+def clean_private_key(key_str):
+    """Очищает и форматирует приватный ключ Google Service Account."""
+    if not key_str:
+        return ""
+    # Удаляем случайные внешние кавычки, если они применились из TOML
+    key_str = key_str.strip().strip("'").strip('"')
+    # Заменяем экранированные переносы строк на настоящие символы новой строки
+    key_str = key_str.replace("\\n", "\n")
+    # Если ключ слипся в одну строку без переносов, пробуем восстановить структуру PEM
+    if "-----BEGIN PRIVATE KEY-----" in key_str and "\n" not in key_str.replace("-----BEGIN PRIVATE KEY-----", ""):
+        header = "-----BEGIN PRIVATE KEY-----"
+        footer = "-----END PRIVATE KEY-----"
+        core = key_str.replace(header, "").replace(footer, "").strip().replace(" ", "")
+        # Разбиваем тело ключа по 64 символа (стандарт PEM)
+        chunks = [core[i:i+64] for i in range(0, len(core), 64)]
+        key_str = header + "\n" + "\n".join(chunks) + "\n" + footer
+    return key_str
+
 def get_gdrive_service():
     """Авторизует и возвращает клиент Google Drive API."""
     if "gdrive" in st.secrets and "service_account" in st.secrets["gdrive"]:
@@ -28,9 +46,10 @@ def get_gdrive_service():
             from google.oauth2 import service_account
             from googleapiclient.discovery import build
             
+            # Копируем структуру словаря из secrets, чтобы не мутировать глобальное состояние
             creds_info = dict(st.secrets["gdrive"]["service_account"])
             if "private_key" in creds_info:
-                creds_info["private_key"] = creds_info["private_key"].replace("\\n", "\n")
+                creds_info["private_key"] = clean_private_key(creds_info["private_key"])
                 
             creds = service_account.Credentials.from_service_account_info(
                 creds_info, 
@@ -374,7 +393,7 @@ if not st.session_state["logged_in"]:
         # --- ИНТЕГРАЦИЯ С ТЕЛЕГРАМ-БОТОМ И WEBAPP ---
         st.write("<div style='text-align: center; margin: 15px 0; color: #64748b;'>или</div>", unsafe_allow_html=True)
         
-        # Получаем имя бота из secrets для построения прямой ссылки
+        # Получаем имя бота из secrets для построения ссылки
         bot_username = st.secrets.get("TELEGRAM_BOT_USERNAME", "vvmc_club_bot")
         
         # Кнопка перехода в бота
@@ -405,7 +424,7 @@ if not st.session_state["logged_in"]:
         </div>
         """, unsafe_allow_html=True)
 
-        # Интерактивный iframe с отладчиком Telegram WebApp для автовхода
+        # Интерактивный iframe с полностью переработанным и безопасным JS-логированием и CORS-обходом
         components.html(
             """
             <div id="btn-container" style="
@@ -423,7 +442,7 @@ if not st.session_state["logged_in"]:
                     Ожидание Telegram-окружения...
                 </div>
                 <div id="debug-log" style="color: #64748b; font-size: 11px; text-align: center; word-break: break-all; max-height: 40px; overflow-y: auto;">
-                    Инициализация...
+                    Инициализация скрипта...
                 </div>
             </div>
 
@@ -453,6 +472,7 @@ if not st.session_state["logged_in"]:
 
                         const tg = window.Telegram;
                         
+                        // Проверяем наличие WebApp и переданных данных
                         if (tg && tg.WebApp && tg.WebApp.initDataUnsafe && tg.WebApp.initDataUnsafe.user) {
                             statusDiv.innerHTML = "⚡ Авторизация обнаружена!";
                             tg.WebApp.ready();
@@ -463,35 +483,60 @@ if not st.session_state["logged_in"]:
                             
                             log("Пользователь найден: " + username);
                             
-                            // Получаем адрес родительского окна (Streamlit) через referrer в обход ограничений CORS
-                            let parentUrlString = document.referrer;
-                            if (!parentUrlString || parentUrlString === "") {
-                                parentUrlString = window.location.ancestorOrigins ? window.location.ancestorOrigins[0] : window.location.href;
+                            // Извлекаем чистый базовый путь Streamlit приложения, обходя CORS ограничения iframe
+                            let parentUrlString = "";
+                            try {
+                                // 1. Попытка через ancestorOrigins (Chrome)
+                                if (window.location.ancestorOrigins && window.location.ancestorOrigins.length > 0) {
+                                    parentUrlString = window.location.ancestorOrigins[0];
+                                }
+                                // 2. Попытка через document.referrer
+                                if (!parentUrlString && document.referrer) {
+                                    parentUrlString = document.referrer;
+                                }
+                            } catch (e) {
+                                log("Ошибка чтения referrer: " + e.message, true);
                             }
                             
-                            if (parentUrlString) {
-                                let url = new URL(parentUrlString);
-                                url.searchParams.set("tg_user", username);
-                                url.searchParams.set("tg_ref", "telegram");
-                                
-                                log("Перенаправление родителя на: " + url.pathname);
-                                // Безопасное перенаправление родителя
-                                window.top.location.href = url.href;
+                            // Если не удалось определить родительский домен, используем текущий хост как фоллбек
+                            if (!parentUrlString) {
+                                parentUrlString = window.location.origin;
+                            }
+                            
+                            log("Родительский URL: " + parentUrlString);
+                            
+                            // Формируем чистый редирект-URL с параметрами
+                            let cleanUrl;
+                            try {
+                                cleanUrl = new URL(parentUrlString);
+                            } catch(urlErr) {
+                                // Если строка не парсится как полный URL, парсим текущую страницу
+                                cleanUrl = new URL(window.location.href);
+                            }
+                            
+                            cleanUrl.searchParams.set("tg_user", username);
+                            cleanUrl.searchParams.set("tg_ref", "telegram");
+                            
+                            log("Редирект: " + cleanUrl.href);
+                            
+                            // Безопасное перенаправление родительской вкладки Streamlit
+                            if (window.top) {
+                                window.top.location.href = cleanUrl.href;
                             } else {
-                                log("Не удалось определить URL родителя", true);
+                                window.location.href = cleanUrl.href;
                             }
                         } else {
                             statusDiv.innerHTML = "📢 Режим браузера";
-                            log("Вы не внутри Telegram клиента. Авто-вход сработает при открытии сайта внутри Telegram-бота.");
+                            log("Вы открыли сайт снаружи Telegram. Автовход сработает только внутри приложения Telegram-бота.");
                         }
                     } catch (err) {
-                        statusDiv.innerHTML = "⚠️ Ошибка инициализации";
-                        log(err.message, true);
+                        statusDiv.innerHTML = "⚠️ Системный сбой";
+                        log("Ошибка: " + err.message, true);
                     }
                 }
                 
-                // Даем небольшую задержку на подгрузку DOM и API
-                setTimeout(initTelegram, 400);
+                // Запуск инициализации с надежным таймаутом
+                setTimeout(initTelegram, 500);
             </script>
             """,
             height=120,
@@ -500,11 +545,11 @@ if not st.session_state["logged_in"]:
     with col_info_box:
         st.markdown("""
         <div style="background-color: #0f172a; border: 1px solid #1e293b; border-radius: 12px; padding: 15px;">
-            <h4 style="margin-top:0; color:#14b8a6 !important;">💡 Как войти через Telegram?</h4>
-            <ol style="color:#94a3b8; font-size:0.9em; padding-left:20px;">
-                <li style="margin-bottom:8px;">Зайдите в Telegram-бота <strong>vvmc_club_bot</strong> (или в вашего бота) и запустите его.</li>
-                <li style="margin-bottom:8px;">Нажмите кнопку запуска WebApp ("Открыть Клуб" / "Запустить").</li>
-                <li style="margin-bottom:8px;">Сайт откроется внутри Telegram, виджет снизу мгновенно распознает ваш профиль и совершит бесшовный вход!</li>
+            <h4 style="margin-top:0; color:#14b8a6 !important;">💡 Как настроить и зайти?</h4>
+            <ol style="color:#94a3b8; font-size:0.9em; padding-left:20px; margin-bottom:0;">
+                <li style="margin-bottom:8px;">Запустите вашего бота в Telegram.</li>
+                <li style="margin-bottom:8px;">Вы должны открыть сайт <b>внутри Telegram</b> (как WebApp-приложение), а не в обычном браузере.</li>
+                <li style="margin-bottom:8px;">Встроенный в WebApp модуль мгновенно авторизует вас!</li>
             </ol>
         </div>
         """, unsafe_allow_html=True)
