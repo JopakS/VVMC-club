@@ -202,41 +202,51 @@ if "via_telegram" not in st.session_state:
     st.session_state["via_telegram"] = False
 
 # ----------------- TELEGRAM MINI APP ИНТЕГРАЦИЯ (JS-мост) -----------------
-# Подключаем Telegram SDK прямо в основное окно (через уловку с SVG), 
-# полностью минуя песочницу и ограничения Same-Origin Policy!
-st.markdown(
+# Подключаем Telegram SDK. Мы запускаем скрипт-опросник. Он ждёт инициализации
+# библиотеки Telegram, вытягивает юзернейм и мгновенно перенаправляет страницу с параметрами.
+components.html(
     """
-    <svg onload="
+    <script>
         (function() {
-            function initTelegram() {
-                const tg = window.Telegram;
-                if (tg && tg.WebApp) {
+            // Динамически загружаем Telegram WebApp SDK, если его еще нет
+            if (!window.parent.Telegram) {
+                const script = window.parent.document.createElement('script');
+                script.src = 'https://telegram.org/js/telegram-web-app.js';
+                window.parent.document.head.appendChild(script);
+            }
+
+            // Запускаем цикл ожидания готовности Telegram WebApp
+            let attempts = 0;
+            const checkTg = setInterval(() => {
+                attempts++;
+                const tg = window.parent.Telegram || window.Telegram;
+                if (tg && tg.WebApp && tg.WebApp.initDataUnsafe) {
+                    clearInterval(checkTg);
                     tg.WebApp.ready();
-                    tg.WebApp.expand(); 
-                    const user = tg.WebApp.initDataUnsafe?.user;
+                    tg.WebApp.expand(); // Разворачиваем на весь экран смартфона
+
+                    const user = tg.WebApp.initDataUnsafe.user;
                     if (user) {
-                        const username = user.username || user.first_name || 'tg_user';
-                        const url = new URL(window.location.href);
-                        if (url.searchParams.get('tg_user') !== username) {
-                            url.searchParams.set('tg_user', username);
-                            url.searchParams.set('tg_ref', 'telegram');
-                            window.location.href = url.href;
+                        const username = user.username || user.first_name || "tg_user";
+                        const parentUrl = new URL(window.parent.location.href);
+                        
+                        // Если параметр в адресе отсутствует или не совпадает - обновляем URL родителя
+                        if (parentUrl.searchParams.get("tg_user") !== username) {
+                            parentUrl.searchParams.set("tg_user", username);
+                            parentUrl.searchParams.set("tg_ref", "telegram");
+                            window.parent.location.href = parentUrl.href;
                         }
                     }
                 }
-            }
-            if (!window.Telegram) {
-                const script = document.createElement('script');
-                script.src = 'https://telegram.org/js/telegram-web-app.js';
-                script.onload = initTelegram;
-                document.head.appendChild(script);
-            } else {
-                initTelegram();
-            }
+                // Если за 3 секунды (30 попыток) ТГ не ответил, прекращаем попытки (значит открыто в обычном браузере)
+                if (attempts > 30) {
+                    clearInterval(checkTg);
+                }
+            }, 100);
         })();
-    " style="display:none;"></svg>
+    </script>
     """,
-    unsafe_allow_html=True
+    height=0,
 )
 
 # Проверка Telegram-параметров и Автологин
@@ -244,11 +254,13 @@ query_params = st.query_params
 if not st.session_state["logged_in"] and "tg_user" in query_params:
     tg_user = query_params["tg_user"]
     
-    # Регистрация Telegram-пользователя в SQLite, если его еще нет
-    if tg_user not in users_db:
+    # Свежий запрос к БД перед автологином, чтобы избежать рассинхронизации состояния
+    current_users = get_users_dict()
+    
+    if tg_user not in current_users:
         add_user(tg_user, "telegram_auto_pass", is_telegram=1)
-        users_db[tg_user] = "telegram_auto_pass"
-        
+        users_db = get_users_dict() # Сразу обновляем локальный кэш
+    
     st.session_state.update({
         "logged_in": True,
         "current_user": tg_user,
@@ -290,6 +302,7 @@ if not st.session_state["logged_in"]:
                     st.error("❌ Этот пользователь уже зарегистрирован")
                 else:
                     add_user(u, p, is_telegram=0)
+                    users_db = get_users_dict() # Обновляем локальный кэш пользователей
                     st.session_state.update({"logged_in": True, "current_user": u, "via_telegram": False})
                     st.success(f"🎉 Аккаунт '{u}' успешно создан!")
                     st.rerun()
