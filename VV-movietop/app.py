@@ -1,0 +1,782 @@
+import streamlit as st
+import streamlit.components.v1 as components
+import json
+import os
+import requests
+import pandas as pd
+import numpy as np
+from datetime import datetime
+
+# Настройки страницы для расширения границ интерфейса (Широкий экран)
+st.set_page_config(
+    page_title="VVMC Club",
+    page_icon="🎬",
+    layout="wide",  # Делает интерфейс на весь экран, убирая сжатые боковые поля
+    initial_sidebar_state="expanded"
+)
+
+# Настройки путей к файлам
+DATA_FILE = "movies.json"
+USERS_FILE = "users.json"
+BG_DIR = "backgrounds"
+
+def load_data(file, default):
+    """Безопасная загрузка данных из JSON."""
+    if os.path.exists(file):
+        try:
+            with open(file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return default
+    return default
+
+def save_data(file, data):
+    """Синхронное сохранение данных на диск."""
+    with open(file, "w", encoding="utf-8") as f: 
+        json.dump(data, f, ensure_ascii=False, indent=4)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+
+def migrate_data(movies_list):
+    """
+    Миграция данных со старой шкалы (1-10) на шкалу (1-100) 
+    и структуры оценок под поддержку 'quips' (комментариев).
+    """
+    updated = False
+    for movie in movies_list:
+        if "ratings" not in movie or not isinstance(movie["ratings"], dict):
+            movie["ratings"] = {}
+            updated = True
+            
+        for user, r_data in list(movie["ratings"].items()):
+            if isinstance(r_data, (int, float)):
+                score_100 = int(r_data * 10) if r_data <= 10.0 else int(r_data)
+                movie["ratings"][user] = {
+                    "score": max(1, min(100, score_100)),
+                    "quip": "",
+                    "date": datetime.now().strftime("%Y-%m-%d %H:%M")
+                }
+                updated = True
+            elif isinstance(r_data, dict):
+                if "score" not in r_data:
+                    r_data["score"] = 50
+                    updated = True
+                if "quip" not in r_data:
+                    r_data["quip"] = ""
+                    updated = True
+                if "date" not in r_data:
+                    r_data["date"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    updated = True
+                    
+    if updated:
+        save_data(DATA_FILE, movies_list)
+    return movies_list
+
+# Инициализация и миграция баз данных
+users_db = load_data(USERS_FILE, {"admin": "admin", "user1": "1111", "user2": "2222"})
+movies = load_data(DATA_FILE, [])
+movies = migrate_data(movies)
+
+# Определение фонов
+if "bg_choice" not in st.session_state: 
+    st.session_state["bg_choice"] = "Стандартный"
+    
+bg_files = ["Стандартный"]
+if os.path.exists(BG_DIR):
+    bg_files += [f for f in os.listdir(BG_DIR) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+
+# Кастомные стили (высокотехнологичный темный дизайн, бирюзовые акценты)
+st.markdown("""
+<style>
+    /* Основной фон и контейнеры */
+    .stApp {
+        background-color: #0b0f19;
+        color: #f1f5f9;
+    }
+    
+    /* Убираем лишние отступы сверху для экономии места */
+    .block-container {
+        padding-top: 1rem !important;
+        padding-bottom: 2rem !important;
+        max-width: 95% !important;
+    }
+    
+    /* Стили заголовков */
+    h1, h2, h3 {
+        color: #f8fafc !important;
+        font-family: 'Segoe UI', Roboto, Helvetica, sans-serif;
+        font-weight: 700 !important;
+    }
+    
+    /* Кликабельная шапка VVMC */
+    .vvmc-header-link {
+        text-decoration: none !important;
+        display: inline-block;
+        transition: opacity 0.2s, transform 0.2s;
+        cursor: pointer;
+    }
+    .vvmc-header-link:hover {
+        opacity: 0.8;
+        transform: scale(1.02);
+    }
+    .vvmc-title {
+        margin: 0; 
+        font-size: 2.8rem; 
+        font-weight: 800; 
+        background: -webkit-linear-gradient(45deg, #0d9488, #14b8a6); 
+        -webkit-background-clip: text; 
+        -webkit-text-fill-color: transparent;
+    }
+    
+    /* Карточка фильма */
+    .criticker-card {
+        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 18px;
+        margin-bottom: 20px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+        transition: transform 0.2s, border-color 0.2s;
+    }
+    .criticker-card:hover {
+        transform: translateY(-2px);
+        border-color: #0d9488;
+    }
+    
+    /* Индикаторы рейтинга */
+    .criticker-badge {
+        display: inline-block;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-weight: bold;
+        font-size: 0.9em;
+        text-align: center;
+        min-width: 45px;
+    }
+    .badge-high { background-color: #0d9488; color: #ffffff; }
+    .badge-mid { background-color: #d97706; color: #ffffff; }
+    .badge-low { background-color: #dc2626; color: #ffffff; }
+    
+    /* Комментарии (Quips) */
+    .quip-box {
+        background-color: #1e293b;
+        border-left: 3px solid #0d9488;
+        padding: 8px 12px;
+        margin: 5px 0;
+        border-radius: 0 8px 8px 0;
+        font-style: italic;
+        font-size: 0.9em;
+        color: #cbd5e1;
+    }
+    
+    /* Модернизация сайдбара */
+    section[data-testid="stSidebar"] {
+        background-color: #080c14 !important;
+        border-right: 1px solid #1e293b;
+    }
+    
+    /* Оформление кнопок в сайдбаре */
+    section[data-testid="stSidebar"] button {
+        background-color: #1e293b !important;
+        color: #f1f5f9 !important;
+        border: 1px solid #334155 !important;
+        border-radius: 8px !important;
+        font-weight: 600 !important;
+        padding: 6px 12px !important;
+        transition: all 0.25s ease !important;
+    }
+    section[data-testid="stSidebar"] button:hover {
+        background-color: #dc2626 !important;
+        color: #ffffff !important;
+        border-color: #ef4444 !important;
+        box-shadow: 0 0 12px rgba(239, 68, 68, 0.4) !important;
+    }
+    
+    /* Вкладки навигации (РАСШИРЕННАЯ НА ВСЮ ШИРИНУ) */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        background-color: #0f172a;
+        padding: 8px 10px;
+        border-radius: 14px;
+        border: 1px solid #1e293b;
+        box-shadow: inset 0 2px 4px rgba(0,0,0,0.3);
+        display: flex;
+        justify-content: space-between;
+        width: 100% !important;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        color: #94a3b8;
+        border-radius: 10px;
+        padding: 10px 14px;
+        font-size: 0.95rem;
+        font-weight: 600;
+        background-color: transparent;
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        border: 1px solid transparent;
+        flex-grow: 1;
+        text-align: center;
+    }
+    
+    .stTabs [data-baseweb="tab-list"] button[aria-label="Scroll left"],
+    .stTabs [data-baseweb="tab-list"] button[aria-label="Scroll right"] {
+        display: none !important;
+    }
+    
+    .stTabs [data-baseweb="tab"]:hover {
+        color: #f8fafc;
+        background-color: #1e293b;
+        border-color: #334155;
+    }
+    
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(135deg, #0d9488 0%, #14b8a6 100%) !important;
+        color: #ffffff !important;
+        box-shadow: 0 4px 12px rgba(13, 148, 136, 0.35);
+        border-color: #14b8a6;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Инициализация сессии пользователя
+if "logged_in" not in st.session_state: 
+    st.session_state["logged_in"] = False
+if "current_user" not in st.session_state: 
+    st.session_state["current_user"] = None
+if "via_telegram" not in st.session_state:
+    st.session_state["via_telegram"] = False
+
+# ----------------- TELEGRAM MINI APP ИНТЕГРАЦИЯ (JS-мост) -----------------
+# Этот невидимый компонент считывает данные зашедшего пользователя напрямую из API Telegram WebApp
+components.html(
+    """
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script>
+        window.addEventListener('load', () => {
+            const tg = window.Telegram || (window.parent ? window.parent.Telegram : null);
+            if (tg && tg.WebApp) {
+                tg.WebApp.ready();
+                tg.WebApp.expand(); // Автоматически раскрываем Mini App на весь экран смартфона!
+                
+                const user = tg.WebApp.initDataUnsafe?.user;
+                if (user) {
+                    // Формируем имя пользователя (предпочитаем юзернейм, иначе имя)
+                    const username = user.username || user.first_name || "tg_user";
+                    const targetWindow = window.parent || window;
+                    const url = new URL(targetWindow.location.href);
+                    
+                    // Передаем имя и пометку в query-параметры Streamlit
+                    if (url.searchParams.get("tg_user") !== username) {
+                        url.searchParams.set("tg_user", username);
+                        url.searchParams.set("tg_ref", "telegram");
+                        targetWindow.location.href = url.href;
+                    }
+                }
+            }
+        });
+    </script>
+    """,
+    height=0,
+)
+
+# Проверяем наличие Telegram-параметров в URL для беспарольного входа
+query_params = st.query_params
+if not st.session_state["logged_in"] and "tg_user" in query_params:
+    tg_user = query_params["tg_user"]
+    
+    # Если зашедшего друга еще нет в нашей базе пользователей — регистрируем его автоматически!
+    if tg_user not in users_db:
+        users_db[tg_user] = "telegram_auto_pass" # Проставляем заглушку пароля
+        save_data(USERS_FILE, users_db)
+        
+    st.session_state.update({
+        "logged_in": True,
+        "current_user": tg_user,
+        "via_telegram": True
+    })
+    st.rerun()
+
+# Экран логина (для обычных браузеров)
+if not st.session_state["logged_in"]:
+    st.markdown("""
+    <div style="text-align: center; margin-bottom: 25px;">
+        <h1 class="vvmc-title">🎬 VVMC CLUB</h1>
+        <p style='color: #94a3b8; margin-top: 5px;'>Приватный кино-топ и анализ вкусов для узкого круга друзей</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    col_login, _ = st.columns([2, 1])
+    with col_login:
+        with st.form("login_form"):
+            st.subheader("Вход в киноклуб")
+            u = st.text_input("Логин / Имя пользователя")
+            p = st.text_input("Пароль", type="password")
+            
+            submit_btn = st.form_submit_button("Войти")
+            register_btn = st.form_submit_button("Зарегистрировать новый аккаунт")
+            
+            if submit_btn:
+                if users_db.get(u) == p:
+                    st.session_state.update({"logged_in": True, "current_user": u, "via_telegram": False})
+                    st.success(f"Добро пожаловать обратно, {u}!")
+                    st.rerun()
+                else:
+                    st.error("❌ Неверный логин или пароль")
+            
+            if register_btn:
+                if len(u) < 2 or len(p) < 4:
+                    st.warning("⚠️ Логин должен быть от 2 символов, а пароль от 4 символов")
+                elif u in users_db:
+                    st.error("❌ Этот пользователь уже зарегистрирован")
+                else:
+                    users_db[u] = p
+                    save_data(USERS_FILE, users_db)
+                    st.session_state.update({"logged_in": True, "current_user": u, "via_telegram": False})
+                    st.success(f"🎉 Аккаунт '{u}' успешно создан!")
+                    st.rerun()
+    st.stop()
+
+# ----------------- ОСНОВНОЙ ИНТЕРФЕЙС ПРИЛОЖЕНИЯ -----------------
+
+# Шапка сайта (кликабельная - сбрасывает стейт и кидает на 1 вкладку)
+st.markdown("""
+<div style="text-align: center; margin-bottom: 20px;">
+    <a href="javascript:window.parent.location.href = window.parent.location.pathname;" class="vvmc-header-link" title="На главную (Лента критики)">
+        <h1 class="vvmc-title">🎬 VVMC CLUB</h1>
+    </a>
+</div>
+""", unsafe_allow_html=True)
+
+# Полезные функции расчета статистики и TCI
+def get_badge_class(score):
+    if score >= 75: return "badge-high"
+    if score >= 40: return "badge-mid"
+    return "badge-low"
+
+def calculate_tci(user1, user2, movies_list):
+    """Расчет Taste Compatibility Index (TCI)."""
+    scores_u1 = []
+    scores_u2 = []
+    for m in movies_list:
+        if m.get("status") == "watched" and user1 in m["ratings"] and user2 in m["ratings"]:
+            scores_u1.append(m["ratings"][user1]["score"])
+            scores_u2.append(m["ratings"][user2]["score"])
+            
+    if len(scores_u1) < 3:
+        return None, len(scores_u1)
+        
+    mae = np.mean(np.abs(np.array(scores_u1) - np.array(scores_u2)))
+    tci_score = max(0, min(100, int(100 - mae)))
+    return tci_score, len(scores_u1)
+
+# Панель навигации / Сайдбар
+with st.sidebar:
+    # 1. Красивая карточка пользователя
+    user_initial = st.session_state['current_user'][0].upper() if st.session_state['current_user'] else "?"
+    status_badge = "TELEGRAM MEMBER" if st.session_state["via_telegram"] else "VVMC CLUB MEMBER"
+    st.markdown(f"""
+    <div style="background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border: 1px solid #334155; border-radius: 14px; padding: 18px; margin-bottom: 20px; text-align: center; box-shadow: 0 4px 10px rgba(0,0,0,0.2);">
+        <div style="width: 52px; height: 52px; background: linear-gradient(135deg, #0d9488 0%, #14b8a6 100%); border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 12px auto; font-size: 1.6rem; font-weight: bold; color: white; box-shadow: 0 0 15px rgba(13,148,136,0.5);">
+            {user_initial}
+        </div>
+        <div style="font-size: 1.15rem; font-weight: bold; color: #f8fafc; margin-bottom: 2px;">{st.session_state['current_user']}</div>
+        <div style="font-size: 0.8rem; color: #14b8a6; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; margin-bottom: 12px;">{status_badge}</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Кнопка выхода
+    if st.button("🚪 Выйти из аккаунта", use_container_width=True):
+        st.session_state.update({"logged_in": False, "current_user": None, "via_telegram": False})
+        # Сбрасываем URL параметры при выходе
+        st.query_params.clear()
+        st.rerun()
+        
+    st.markdown("<div style='margin-bottom: 15px;'></div>", unsafe_allow_html=True)
+    
+    # 2. Настройки кастомизации
+    st.markdown("<p style='font-size: 0.9em; font-weight: bold; color: #94a3b8; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px;'>🎨 Настройка темы</p>", unsafe_allow_html=True)
+    selected_bg = st.selectbox("Фон приложения", bg_files, label_visibility="collapsed")
+    if selected_bg != st.session_state["bg_choice"]:
+        st.session_state["bg_choice"] = selected_bg
+        st.rerun()
+        
+    st.markdown("<hr style='border: 1px solid #1e293b; margin: 20px 0;'/>", unsafe_allow_html=True)
+    
+    # 3. Визуальная шкала
+    st.markdown("""
+    <div style="background-color: #0f172a; border-radius: 12px; border: 1px solid #1e293b; padding: 15px; box-shadow: inset 0 2px 4px rgba(0,0,0,0.2);">
+        <div style="font-weight: 700; color: #f8fafc; margin-bottom: 12px; font-size: 0.9em; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #1e293b; padding-bottom: 6px; display: flex; align-items: center; gap: 6px;">
+            <span>🎯</span> Шкала оценок
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+            <div style="display: flex; align-items: center; justify-content: space-between;">
+                <span class="criticker-badge badge-high" style="padding: 1px 8px; font-size: 0.75rem;">90 - 100</span>
+                <span style="font-size: 0.85em; color: #cbd5e1; font-weight: 500;">Шедевр</span>
+            </div>
+            <div style="display: flex; align-items: center; justify-content: space-between;">
+                <span class="criticker-badge badge-high" style="background-color: #14b8a6; padding: 1px 8px; font-size: 0.75rem;">75 - 89</span>
+                <span style="font-size: 0.85em; color: #cbd5e1; font-weight: 500;">Отличный</span>
+            </div>
+            <div style="display: flex; align-items: center; justify-content: space-between;">
+                <span class="criticker-badge badge-mid" style="padding: 1px 8px; font-size: 0.75rem;">50 - 74</span>
+                <span style="font-size: 0.85em; color: #cbd5e1; font-weight: 500;">Хороший</span>
+            </div>
+            <div style="display: flex; align-items: center; justify-content: space-between;">
+                <span class="criticker-badge badge-mid" style="background-color: #f97316; padding: 1px 8px; font-size: 0.75rem;">30 - 49</span>
+                <span style="font-size: 0.85em; color: #cbd5e1; font-weight: 500;">Проходной</span>
+            </div>
+            <div style="display: flex; align-items: center; justify-content: space-between;">
+                <span class="criticker-badge badge-low" style="padding: 1px 8px; font-size: 0.75rem;">1 - 29</span>
+                <span style="font-size: 0.85em; color: #cbd5e1; font-weight: 500;">Ужасно</span>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# Главный интерфейс вкладок
+tab_feed, tab_list, tab_watchlist, tab_add, tab_rating = st.tabs([
+    "💬 Лента Критики", 
+    "🏆 Просмотренные и оценённые", 
+    "🎬 Посмотреть позже", 
+    "➕ Добавить фильм", 
+    "📊 Анализ & Совместимость"
+])
+
+# 1. ВКЛАДКА: Лента Критики
+with tab_feed:
+    st.subheader("🔥 Последние квипы и оценки друзей")
+    
+    events = []
+    for m in movies:
+        for user, r_data in m.get("ratings", {}).items():
+            events.append({
+                "movie": m["title"],
+                "poster": m.get("poster"),
+                "user": user,
+                "score": r_data["score"],
+                "quip": r_data["quip"],
+                "date": r_data.get("date", "Ранее")
+            })
+            
+    if not events:
+        st.info("Пока никто не оставил оценок. Будьте первым!")
+    else:
+        events.sort(key=lambda x: x["date"], reverse=True)
+        
+        for e in events[:15]:
+            col_post, col_info = st.columns([1, 10])
+            with col_post:
+                if e["poster"]:
+                    st.image(e["poster"], use_container_width=True)
+                else:
+                    st.write("🎬")
+            with col_info:
+                badge_style = get_badge_class(e['score'])
+                st.markdown(f"""
+                <span class="criticker-badge {badge_style}">{e['score']}</span> 
+                <strong>{e['user']}</strong> оценил(а) фильм <strong>«{e['movie']}»</strong>
+                <span style='color: #64748b; font-size: 0.8em; float: right;'>{e['date']}</span>
+                """, unsafe_allow_html=True)
+                if e["quip"]:
+                    st.markdown(f'<div class="quip-box">“{e["quip"]}”</div>', unsafe_allow_html=True)
+                st.markdown("<div style='margin-bottom:15px;'></div>", unsafe_allow_html=True)
+
+# 2. ВКЛАДКА: Мой ТОП фильмов
+with tab_list:
+    st.subheader("🏆 Ваши оценки и управление")
+    
+    watched_movies = [m for m in movies if m.get("status") == "watched"]
+    
+    if not watched_movies:
+        st.info("Вы пока не оценили ни одного фильма. Перенесите фильм из списка 'Посмотреть позже' или добавьте новый!")
+    else:
+        search_query = st.text_input("Поиск по вашему ТОПу", "").lower()
+        filtered_watched = [m for m in watched_movies if search_query in m["title"].lower()]
+        
+        for m in filtered_watched:
+            user_data = m["ratings"].get(st.session_state["current_user"], {})
+            has_rated = bool(user_data)
+            current_score = user_data.get("score", 50)
+            current_quip = user_data.get("quip", "")
+            
+            # Состояние редактирования (развернуто, если еще не оценили)
+            edit_key = f"edit_{m['title']}"
+            if edit_key not in st.session_state:
+                st.session_state[edit_key] = not has_rated
+            
+            with st.container():
+                st.markdown(f"""
+                <div class="criticker-card" style="padding: 12px 18px; margin-bottom: 10px;">
+                    <h3 style='margin:0;'>{m['title']}</h3>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                col_img, col_inputs = st.columns([1, 8])
+                with col_img:
+                    if m.get("poster"):
+                        st.image(m["poster"], use_container_width=True)
+                
+                with col_inputs:
+                    if st.session_state[edit_key]:
+                        # --- РАЗВЕРНУТЫЙ ВИД (Редактирование) ---
+                        new_score = st.slider("Ваша оценка (1-100)", 1, 100, int(current_score), key=f"score_slider_{m['title']}")
+                        new_quip = st.text_input("Квип (короткое мнение / цитата)", value=current_quip, max_chars=200, key=f"quip_text_{m['title']}")
+                        
+                        others_ratings = {u: r for u, r in m["ratings"].items() if u != st.session_state["current_user"]}
+                        if others_ratings:
+                            st.markdown("<p style='font-size:0.85em; color:#94a3b8; margin:5px 0 2px 0;'>Оценки друзей:</p>", unsafe_allow_html=True)
+                            friends_html = ""
+                            for friend, f_data in others_ratings.items():
+                                f_badge = get_badge_class(f_data['score'])
+                                friends_html += f"""
+                                <span style='margin-right: 15px; font-size: 0.85em;'>
+                                    <strong>{friend}</strong>: 
+                                    <span class="criticker-badge {f_badge}" style="padding: 1px 6px; font-size:0.8em;">{f_data['score']}</span>
+                                </span>
+                                """
+                            st.markdown(friends_html, unsafe_allow_html=True)
+                        
+                        # Кнопки сохранения и удаления
+                        col_b1, col_b2, col_b3 = st.columns([2, 2, 6])
+                        with col_b1:
+                            if st.button("Сохранить", key=f"save_btn_{m['title']}", type="primary"):
+                                m["ratings"][st.session_state["current_user"]] = {
+                                    "score": new_score,
+                                    "quip": new_quip,
+                                    "date": datetime.now().strftime("%Y-%m-%d %H:%M")
+                                }
+                                save_data(DATA_FILE, movies)
+                                st.session_state[edit_key] = False # Сворачиваем интерфейс
+                                st.rerun()
+                        with col_b2:
+                            if has_rated and st.button("Отмена", key=f"cancel_btn_{m['title']}"):
+                                st.session_state[edit_key] = False
+                                st.rerun()
+                        with col_b3:
+                            if st.button("🗑️ Удалить фильм", key=f"del_exp_{m['title']}", type="secondary"):
+                                movies.remove(m)
+                                save_data(DATA_FILE, movies)
+                                st.rerun()
+                    else:
+                        # --- КОМПАКТНЫЙ ВИД ---
+                        badge_style = get_badge_class(current_score)
+                        st.markdown(f"""
+                        <div style="margin-bottom: 8px;">
+                            <span style="color:#94a3b8; font-size: 0.9em; margin-right: 5px;">Ваша оценка:</span> 
+                            <span class="criticker-badge {badge_style}">{current_score}</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        if current_quip:
+                            st.markdown(f'<div class="quip-box" style="margin-bottom: 15px;">“{current_quip}”</div>', unsafe_allow_html=True)
+                        
+                        col_c1, col_c2 = st.columns([2, 8])
+                        with col_c1:
+                            if st.button("✏️ Изменить", key=f"edit_btn_{m['title']}"):
+                                st.session_state[edit_key] = True
+                                st.rerun()
+                        with col_c2:
+                            if st.button("🗑️ Удалить", key=f"del_comp_{m['title']}", type="secondary"):
+                                movies.remove(m)
+                                save_data(DATA_FILE, movies)
+                                st.rerun()
+
+                st.markdown("<hr style='border: 1px solid #1e293b; margin-top:10px;'/>", unsafe_allow_html=True)
+
+# 3. ВКЛАДКА: Посмотреть позже
+with tab_watchlist:
+    st.subheader("🎬 Ваш лист ожидания")
+    
+    watchlist_movies = [m for m in movies if m.get("status") == "watchlist"]
+    
+    if not watchlist_movies:
+        st.info("Ваш список 'Посмотреть позже' пуст. Добавьте фильмы через вкладку добавления!")
+    else:
+        cols = st.columns(4)
+        for idx, m in enumerate(watchlist_movies):
+            with cols[idx % 4]:
+                st.markdown(f"#### {m['title']}")
+                
+                # Показываем, кто добавил фильм
+                adder = m.get('added_by', 'Неизвестно')
+                st.markdown(f"<p style='font-size: 0.85em; color: #94a3b8; margin-top: -10px;'>👤 Добавил(а): <strong>{adder}</strong></p>", unsafe_allow_html=True)
+                
+                if m.get("poster"):
+                    st.image(m["poster"], use_container_width=True)
+                
+                with st.popover("Оценить и перенести в ТОП", use_container_width=True):
+                    watch_score = st.slider("Ваша оценка (1-100)", 1, 100, 70, key=f"watch_sc_{m['title']}")
+                    watch_quip = st.text_input("Квип (отзыв)", key=f"watch_qp_{m['title']}")
+                    
+                    if st.button("Готово! Просмотрено", key=f"confirm_watch_{m['title']}", type="primary", use_container_width=True):
+                        m["status"] = "watched"
+                        m["ratings"][st.session_state["current_user"]] = {
+                            "score": watch_score,
+                            "quip": watch_quip,
+                            "date": datetime.now().strftime("%Y-%m-%d %H:%M")
+                        }
+                        save_data(DATA_FILE, movies)
+                        st.success(f"«{m['title']}» перенесен в ТОП!")
+                        st.rerun()
+                
+                if st.button("Удалить из списка", key=f"delete_wl_{m['title']}", type="secondary", use_container_width=True):
+                    movies.remove(m)
+                    save_data(DATA_FILE, movies)
+                    st.rerun()
+
+# 4. ВКЛАДКА: Добавить фильм
+with tab_add:
+    st.subheader("🔍 Поиск и добавление новых фильмов через TMDB")
+    
+    search = st.text_input("Введите оригинальное или русское название фильма")
+    
+    with st.expander("Добавить фильм вручную (без поиска)"):
+        manual_title = st.text_input("Название фильма вручную")
+        manual_poster = st.text_input("Ссылка на постер (необязательно)")
+        manual_status = st.selectbox("Куда добавить?", ["Сразу в ТОП (просмотрено)", "В список Посмотреть позже"])
+        
+        if st.button("Добавить фильм вручную"):
+            if manual_title:
+                new_m = {
+                    "title": manual_title,
+                    "poster": manual_poster if manual_poster else None,
+                    "ratings": {},
+                    "status": "watched" if "Сразу в ТОП" in manual_status else "watchlist",
+                    "added_by": st.session_state["current_user"]
+                }
+                movies.append(new_m)
+                save_data(DATA_FILE, movies)
+                st.success(f"Фильм «{manual_title}» успешно добавлен вручную!")
+                st.rerun()
+            else:
+                st.error("Пожалуйста, заполните название!")
+
+    if search:
+        api_key = st.secrets.get("TMDB_API_KEY", "")
+        
+        if not api_key:
+            st.warning("⚠️ TMDB_API_KEY отсутствует в st.secrets. Вы можете добавить фильм вручную выше, либо настроить API ключ.")
+        else:
+            try:
+                res_raw = requests.get(
+                    "https://api.themoviedb.org/3/search/movie", 
+                    params={"api_key": api_key, "query": search, "language": "ru-RU"}
+                )
+                res = res_raw.json().get("results", [])
+                
+                if not res:
+                    st.info("По вашему запросу ничего не найдено.")
+                else:
+                    st.write("### Результаты поиска:")
+                    for item in res[:5]:
+                        col_card_img, col_card_info = st.columns([1, 6])
+                        
+                        poster_url = f"https://image.tmdb.org/t/p/w500{item['poster_path']}" if item.get('poster_path') else None
+                        
+                        with col_card_img:
+                            if poster_url:
+                                st.image(poster_url, use_container_width=True)
+                            else:
+                                st.write("Нет постера")
+                                
+                        with col_card_info:
+                            st.markdown(f"**{item['title']}** ({item.get('release_date', 'Дата неизвестна')[:4]})")
+                            st.write(item.get("overview", "Описание отсутствует."))
+                            
+                            col_b1, col_b2 = st.columns(2)
+                            with col_b1:
+                                if st.button(f"Добавить в ТОП (watched)", key=f"add_t_{item['id']}", use_container_width=True):
+                                    movies.append({
+                                        "title": item['title'], 
+                                        "poster": poster_url, 
+                                        "ratings": {}, 
+                                        "status": "watched",
+                                        "added_by": st.session_state["current_user"]
+                                    })
+                                    save_data(DATA_FILE, movies)
+                                    st.success(f"«{item['title']}» добавлен в список просмотренных!")
+                                    st.rerun()
+                            with col_b2:
+                                if st.button(f"В 'Посмотреть позже' (watchlist)", key=f"add_w_{item['id']}", use_container_width=True):
+                                    movies.append({
+                                        "title": item['title'], 
+                                        "poster": poster_url, 
+                                        "ratings": {}, 
+                                        "status": "watchlist",
+                                        "added_by": st.session_state["current_user"]
+                                    })
+                                    save_data(DATA_FILE, movies)
+                                    st.success(f"«{item['title']}» добавлен в лист ожидания!")
+                                    st.rerun()
+                        st.markdown("---")
+            except Exception as e:
+                st.error(f"Ошибка при работе с TMDB API: {e}")
+
+# 5. ВКЛАДКА: Сравнение, Анализ & TCI
+with tab_rating:
+    st.subheader("📊 Аналитика клуба")
+    
+    col_tci, col_leaderboard = st.columns([1, 1])
+    
+    with col_tci:
+        st.write("### 🤝 Индекс совместимости (TCI) друзей")
+        st.markdown("Показывает схожесть оценок на основе общих просмотренных фильмов.")
+        
+        all_users = list(users_db.keys())
+        
+        if len(all_users) < 2:
+            st.info("Для расчета совместимости требуется хотя бы 2 зарегистрированных пользователя.")
+        else:
+            tci_data = []
+            for i, u1 in enumerate(all_users):
+                for u2 in all_users[i+1:]:
+                    tci, shared_count = calculate_tci(u1, u2, movies)
+                    if tci is not None:
+                        tci_data.append({
+                            "Пара друзей": f"👥 {u1} и {u2}",
+                            "Индекс TCI": f"🎯 {tci}%",
+                            "Общих фильмов": f"🎬 {shared_count} шт."
+                        })
+            
+            if tci_data:
+                st.dataframe(pd.DataFrame(tci_data), use_container_width=True, hide_index=True)
+            else:
+                st.info("Пока нет общих просмотренных фильмов у пользователей (нужно минимум 3 общих фильма для подсчета TCI).")
+                
+    with col_leaderboard:
+        st.write("### 🏆 Общий Топ фильмов клуба")
+        st.markdown("Средневзвешенный рейтинг фильмов по версии участников клуба.")
+        
+        leaderboard = []
+        for m in [m for m in movies if m.get("status") == "watched"]:
+            ratings_list = [r_data["score"] for r_data in m["ratings"].values() if isinstance(r_data, dict) and "score" in r_data]
+            if ratings_list:
+                avg_score = int(np.mean(ratings_list))
+                leaderboard.append({
+                    "Постер": m.get("poster"),
+                    "Фильм": m["title"],
+                    "Средний балл": avg_score,
+                    "Голосов": len(ratings_list)
+                })
+                
+        if leaderboard:
+            leaderboard.sort(key=lambda x: x["Средний балл"], reverse=True)
+            
+            top_cols = st.columns(2)
+            for idx, item in enumerate(leaderboard[:6]):
+                with top_cols[idx % 2]:
+                    badge_color = get_badge_class(item["Средний балл"])
+                    st.markdown(f"""
+                    <div class="criticker-card" style='text-align: center; padding: 10px; margin-bottom: 10px;'>
+                        <span class="criticker-badge {badge_color}" style="font-size: 0.9em; margin-bottom: 4px;">★ {item["Средний балл"]}</span>
+                        <h5 style='min-height: 40px; margin: 5px 0; font-size: 0.95em;'>{item["Фильм"]}</h5>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    if item["Постер"]:
+                        st.image(item["Постер"], use_container_width=True)
+                    st.caption(f"Голосов: {item['Голосов']}")
+        else:
+            st.info("Ни один фильм еще не оценен.")
