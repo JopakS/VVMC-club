@@ -18,22 +18,6 @@ st.set_page_config(
 )
 
 # ----------------- РЕЗЕРВНОЕ КОПИРОВАНИЕ НА GOOGLE DRIVE -----------------
-# Для работы интеграции вам понадобятся библиотеки: google-api-python-client и google-auth
-# Добавьте их в ваш requirements.txt:
-# google-api-python-client
-# google-auth
-#
-# Настройки secrets для Google Drive (добавьте в Streamlit Cloud -> Settings -> Secrets):
-# [gdrive]
-# folder_id = "ID_ПАПКИ_НА_ВАШЕМ_ГУГЛ_ДИСКЕ"
-# [gdrive.service_account]
-# type = "service_account"
-# project_id = "..."
-# private_key_id = "..."
-# private_key = "..."
-# client_email = "..."
-# ... (все остальные поля из скачанного JSON-файла ключа сервисного аккаунта)
-
 DB_FILE = "vvmc_club.db"
 BG_DIR = "backgrounds"
 
@@ -44,9 +28,7 @@ def get_gdrive_service():
             from google.oauth2 import service_account
             from googleapiclient.discovery import build
             
-            # Загружаем учетные данные из secrets
             creds_info = dict(st.secrets["gdrive"]["service_account"])
-            # Обрабатываем возможные проблемы со спецсимволами переноса строки в приватном ключе
             if "private_key" in creds_info:
                 creds_info["private_key"] = creds_info["private_key"].replace("\\n", "\n")
                 
@@ -395,9 +377,9 @@ if not st.session_state["logged_in"]:
         # Получаем имя бота из secrets для построения прямой ссылки
         bot_username = st.secrets.get("TELEGRAM_BOT_USERNAME", "vvmc_club_bot")
         
-        # Добавляем две опции: официальный виджет входа И запуск через WebApp-бота.
+        # Кнопка перехода в бота
         st.markdown(f"""
-        <div style="display: flex; flex-direction: column; align-items: center; gap: 12px; margin-bottom: 20px;">
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 12px; margin-bottom: 15px;">
             <a href="https://t.me/{bot_username}" target="_blank" style="text-decoration: none; width: 100%; max-width: 320px;">
                 <div style="
                     background: linear-gradient(135deg, #24A1DE 0%, #1d82b2 100%); 
@@ -417,58 +399,102 @@ if not st.session_state["logged_in"]:
                         <path d="m22 2-7 20-4-9-9-4Z"></path>
                         <path d="M22 2 11 13"></path>
                     </svg>
-                    Открыть WebApp в Telegram Боте
+                    Открыть бота в Telegram
                 </div>
             </a>
         </div>
         """, unsafe_allow_html=True)
 
-        # Компонент для сбора WebApp данных, если пользователь вошел непосредственно внутри фрейма Telegram
+        # Интерактивный iframe с отладчиком Telegram WebApp для автовхода
         components.html(
             """
-            <div id="btn-container" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 60px;">
-                <div id="status" style="color: #94a3b8; font-family: sans-serif; font-size: 13px; font-weight: 500;">Проверка Telegram WebApp окружения...</div>
+            <div id="btn-container" style="
+                display: flex; 
+                flex-direction: column; 
+                align-items: center; 
+                justify-content: center; 
+                background-color: #0f172a; 
+                border: 1px solid #1e293b; 
+                border-radius: 10px; 
+                padding: 15px; 
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            ">
+                <div id="status" style="color: #94a3b8; font-size: 13px; font-weight: 500; text-align: center; margin-bottom: 8px;">
+                    Ожидание Telegram-окружения...
+                </div>
+                <div id="debug-log" style="color: #64748b; font-size: 11px; text-align: center; word-break: break-all; max-height: 40px; overflow-y: auto;">
+                    Инициализация...
+                </div>
             </div>
 
+            <!-- Подключаем скрипт Telegram непосредственно внутри iframe -->
+            <script src="https://telegram.org/js/telegram-web-app.js"></script>
             <script>
+                const statusDiv = document.getElementById('status');
+                const logDiv = document.getElementById('debug-log');
+
+                function log(message, isError = false) {
+                    logDiv.innerHTML = message;
+                    if (isError) {
+                        logDiv.style.color = "#f87171";
+                    } else {
+                        logDiv.style.color = "#10b981";
+                    }
+                }
+
                 function initTelegram() {
                     try {
-                        const tg = (window.parent && window.parent.Telegram) || window.Telegram;
-                        const statusDiv = document.getElementById('status');
+                        log("Проверка скрипта Telegram WebApp...");
+                        if (typeof window.Telegram === 'undefined') {
+                            statusDiv.innerHTML = "❌ Ошибка: Скрипт Telegram не загрузился.";
+                            log("window.Telegram не определен.", true);
+                            return;
+                        }
+
+                        const tg = window.Telegram;
                         
                         if (tg && tg.WebApp && tg.WebApp.initDataUnsafe && tg.WebApp.initDataUnsafe.user) {
+                            statusDiv.innerHTML = "⚡ Авторизация обнаружена!";
                             tg.WebApp.ready();
                             tg.WebApp.expand();
                             
                             const user = tg.WebApp.initDataUnsafe.user;
                             const username = user.username || user.first_name || "tg_user";
                             
-                            let parentUrl;
-                            try {
-                                parentUrl = new URL(window.parent.location.href);
-                            } catch (corsErr) {
-                                parentUrl = new URL(document.referrer || window.location.href);
-                            }
-
-                            parentUrl.searchParams.set("tg_user", username);
-                            parentUrl.searchParams.set("tg_ref", "telegram");
+                            log("Пользователь найден: " + username);
                             
-                            statusDiv.style.color = "#10b981";
-                            statusDiv.innerText = "Авторизация пройдена! Перенаправление...";
-                            window.parent.location.replace(parentUrl.href);
+                            // Получаем адрес родительского окна (Streamlit) через referrer в обход ограничений CORS
+                            let parentUrlString = document.referrer;
+                            if (!parentUrlString || parentUrlString === "") {
+                                parentUrlString = window.location.ancestorOrigins ? window.location.ancestorOrigins[0] : window.location.href;
+                            }
+                            
+                            if (parentUrlString) {
+                                let url = new URL(parentUrlString);
+                                url.searchParams.set("tg_user", username);
+                                url.searchParams.set("tg_ref", "telegram");
+                                
+                                log("Перенаправление родителя на: " + url.pathname);
+                                // Безопасное перенаправление родителя
+                                window.top.location.href = url.href;
+                            } else {
+                                log("Не удалось определить URL родителя", true);
+                            }
                         } else {
-                            statusDiv.innerText = "Запустите приложение из Telegram для авто-входа";
+                            statusDiv.innerHTML = "📢 Режим браузера";
+                            log("Вы не внутри Telegram клиента. Авто-вход сработает при открытии сайта внутри Telegram-бота.");
                         }
                     } catch (err) {
-                        document.getElementById('status').innerText = "";
+                        statusDiv.innerHTML = "⚠️ Ошибка инициализации";
+                        log(err.message, true);
                     }
                 }
                 
-                // Запуск проверки с задержкой для загрузки скрипта Telegram
-                setTimeout(initTelegram, 500);
+                // Даем небольшую задержку на подгрузку DOM и API
+                setTimeout(initTelegram, 400);
             </script>
             """,
-            height=60,
+            height=120,
         )
 
     with col_info_box:
@@ -476,9 +502,9 @@ if not st.session_state["logged_in"]:
         <div style="background-color: #0f172a; border: 1px solid #1e293b; border-radius: 12px; padding: 15px;">
             <h4 style="margin-top:0; color:#14b8a6 !important;">💡 Как войти через Telegram?</h4>
             <ol style="color:#94a3b8; font-size:0.9em; padding-left:20px;">
-                <li style="margin-bottom:8px;">Найдите нашего бота в Telegram и запустите его.</li>
-                <li style="margin-bottom:8px;">Нажмите кнопку "Открыть Клуб" внутри бота.</li>
-                <li style="margin-bottom:8px;">Приложение автоматически распознает ваш аккаунт и выполнит вход без пароля!</li>
+                <li style="margin-bottom:8px;">Зайдите в Telegram-бота <strong>vvmc_club_bot</strong> (или в вашего бота) и запустите его.</li>
+                <li style="margin-bottom:8px;">Нажмите кнопку запуска WebApp ("Открыть Клуб" / "Запустить").</li>
+                <li style="margin-bottom:8px;">Сайт откроется внутри Telegram, виджет снизу мгновенно распознает ваш профиль и совершит бесшовный вход!</li>
             </ol>
         </div>
         """, unsafe_allow_html=True)
@@ -534,13 +560,45 @@ with st.sidebar:
         
     st.markdown("<div style='margin-bottom: 15px;'></div>", unsafe_allow_html=True)
     
+    # --- ДИАГНОСТИКА И СТАТУС GOOGLE DRIVE В СЕЙДБАРЕ ---
+    st.markdown("<p style='font-size: 0.9em; font-weight: bold; color: #94a3b8; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px;'>☁️ Облако Google Drive</p>", unsafe_allow_html=True)
+    
+    gdrive_service = get_gdrive_service()
+    if gdrive_service:
+        st.markdown("<div style='color: #10b981; font-weight: bold; font-size: 0.9em; margin-bottom: 5px;'>● Подключено к Drive API</div>", unsafe_allow_html=True)
+        
+        # Получаем данные о файле
+        try:
+            db_size_kb = os.path.getsize(DB_FILE) / 1024 if os.path.exists(DB_FILE) else 0
+            st.markdown(f"<div style='color: #cbd5e1; font-size: 0.85em;'>Локальная БД: <b>{db_size_kb:.1f} KB</b></div>", unsafe_allow_html=True)
+            
+            folder_id = st.secrets["gdrive"].get("folder_id")
+            cloud_file_id = find_db_on_gdrive(gdrive_service, folder_id)
+            if cloud_file_id:
+                st.markdown(f"<div style='color: #10b981; font-size: 0.85em;'>Файл в облаке: <b>Найден ✓</b><br><span style='color: #64748b; font-size: 0.8em;'>ID: ...{cloud_file_id[-8:]}</span></div>", unsafe_allow_html=True)
+            else:
+                st.markdown("<div style='color: #fbbf24; font-size: 0.85em;'>Файл в облаке: <b>Не создан</b><br><span style='color: #64748b;'>Создастся при синхронизации</span></div>", unsafe_allow_html=True)
+        except Exception:
+            pass
+            
+        if st.button("🔄 Синхронизировать сейчас", use_container_width=True):
+            with st.spinner("Загрузка базы в Google Drive..."):
+                upload_db_to_cloud()
+            st.success("База успешно отправлена!")
+            st.rerun()
+    else:
+        st.markdown("<div style='color: #ef4444; font-weight: bold; font-size: 0.9em;'>○ Отключено (нет Secrets)</div>", unsafe_allow_html=True)
+        st.caption("Настройте credentials в Streamlit Cloud -> Settings -> Secrets")
+        
+    st.markdown("<hr style='border: 1px solid #1e293b; margin: 15px 0;'/>", unsafe_allow_html=True)
+    
     st.markdown("<p style='font-size: 0.9em; font-weight: bold; color: #94a3b8; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px;'>🎨 Настройка темы</p>", unsafe_allow_html=True)
     selected_bg = st.selectbox("Фон приложения", bg_files, label_visibility="collapsed")
     if selected_bg != st.session_state["bg_choice"]:
         st.session_state["bg_choice"] = selected_bg
         st.rerun()
         
-    st.markdown("<hr style='border: 1px solid #1e293b; margin: 20px 0;'/>", unsafe_allow_html=True)
+    st.markdown("<hr style='border: 1px solid #1e293b; margin: 15px 0;'/>", unsafe_allow_html=True)
     
     st.markdown("""
     <div style="background-color: #0f172a; border-radius: 12px; border: 1px solid #1e293b; padding: 15px; box-shadow: inset 0 2px 4px rgba(0,0,0,0.2);">
