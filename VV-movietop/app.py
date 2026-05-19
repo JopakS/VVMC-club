@@ -202,33 +202,41 @@ if "via_telegram" not in st.session_state:
     st.session_state["via_telegram"] = False
 
 # ----------------- TELEGRAM MINI APP ИНТЕГРАЦИЯ (JS-мост) -----------------
-components.html(
+# Подключаем Telegram SDK прямо в основное окно (через уловку с SVG), 
+# полностью минуя песочницу и ограничения Same-Origin Policy!
+st.markdown(
     """
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script>
-        window.addEventListener('load', () => {
-            const tg = window.Telegram || (window.parent ? window.parent.Telegram : null);
-            if (tg && tg.WebApp) {
-                tg.WebApp.ready();
-                tg.WebApp.expand(); 
-                
-                const user = tg.WebApp.initDataUnsafe?.user;
-                if (user) {
-                    const username = user.username || user.first_name || "tg_user";
-                    const targetWindow = window.parent || window;
-                    const url = new URL(targetWindow.location.href);
-                    
-                    if (url.searchParams.get("tg_user") !== username) {
-                        url.searchParams.set("tg_user", username);
-                        url.searchParams.set("tg_ref", "telegram");
-                        targetWindow.location.href = url.href;
+    <svg onload="
+        (function() {
+            function initTelegram() {
+                const tg = window.Telegram;
+                if (tg && tg.WebApp) {
+                    tg.WebApp.ready();
+                    tg.WebApp.expand(); 
+                    const user = tg.WebApp.initDataUnsafe?.user;
+                    if (user) {
+                        const username = user.username || user.first_name || 'tg_user';
+                        const url = new URL(window.location.href);
+                        if (url.searchParams.get('tg_user') !== username) {
+                            url.searchParams.set('tg_user', username);
+                            url.searchParams.set('tg_ref', 'telegram');
+                            window.location.href = url.href;
+                        }
                     }
                 }
             }
-        });
-    </script>
+            if (!window.Telegram) {
+                const script = document.createElement('script');
+                script.src = 'https://telegram.org/js/telegram-web-app.js';
+                script.onload = initTelegram;
+                document.head.appendChild(script);
+            } else {
+                initTelegram();
+            }
+        })();
+    " style="display:none;"></svg>
     """,
-    height=0,
+    unsafe_allow_html=True
 )
 
 # Проверка Telegram-параметров и Автологин
@@ -590,6 +598,7 @@ with tab_add:
                         
                         with col_card_img:
                             if poster_url:
+                                East_url = poster_url
                                 st.image(poster_url, use_container_width=True)
                             else:
                                 st.write("Нет постера")
