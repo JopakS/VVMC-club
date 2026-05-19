@@ -201,55 +201,7 @@ if "current_user" not in st.session_state:
 if "via_telegram" not in st.session_state:
     st.session_state["via_telegram"] = False
 
-# ----------------- TELEGRAM MINI APP ИНТЕГРАЦИЯ (JS-мост) -----------------
-# Подключаем Telegram SDK. Мы запускаем скрипт-опросник. Он ждёт инициализации
-# библиотеки Telegram, вытягивает юзернейм и мгновенно перенаправляет страницу с параметрами.
-components.html(
-    """
-    <script>
-        (function() {
-            // Динамически загружаем Telegram WebApp SDK, если его еще нет
-            if (!window.parent.Telegram) {
-                const script = window.parent.document.createElement('script');
-                script.src = 'https://telegram.org/js/telegram-web-app.js';
-                window.parent.document.head.appendChild(script);
-            }
-
-            // Запускаем цикл ожидания готовности Telegram WebApp
-            let attempts = 0;
-            const checkTg = setInterval(() => {
-                attempts++;
-                const tg = window.parent.Telegram || window.Telegram;
-                if (tg && tg.WebApp && tg.WebApp.initDataUnsafe) {
-                    clearInterval(checkTg);
-                    tg.WebApp.ready();
-                    tg.WebApp.expand(); // Разворачиваем на весь экран смартфона
-
-                    const user = tg.WebApp.initDataUnsafe.user;
-                    if (user) {
-                        const username = user.username || user.first_name || "tg_user";
-                        const parentUrl = new URL(window.parent.location.href);
-                        
-                        // Если параметр в адресе отсутствует или не совпадает - обновляем URL родителя
-                        if (parentUrl.searchParams.get("tg_user") !== username) {
-                            parentUrl.searchParams.set("tg_user", username);
-                            parentUrl.searchParams.set("tg_ref", "telegram");
-                            window.parent.location.href = parentUrl.href;
-                        }
-                    }
-                }
-                // Если за 3 секунды (30 попыток) ТГ не ответил, прекращаем попытки (значит открыто в обычном браузере)
-                if (attempts > 30) {
-                    clearInterval(checkTg);
-                }
-            }, 100);
-        })();
-    </script>
-    """,
-    height=0,
-)
-
-# Проверка Telegram-параметров и Автологин
+# Проверка Telegram-параметров в URL и немедленный автологин при их обнаружении
 query_params = st.query_params
 if not st.session_state["logged_in"] and "tg_user" in query_params:
     tg_user = query_params["tg_user"]
@@ -268,7 +220,7 @@ if not st.session_state["logged_in"] and "tg_user" in query_params:
     })
     st.rerun()
 
-# Экран логина (для обычных браузеров)
+# Экран логина (для обычных браузеров и ручного выбора)
 if not st.session_state["logged_in"]:
     st.markdown("""
     <div style="text-align: center; margin-bottom: 25px;">
@@ -306,6 +258,108 @@ if not st.session_state["logged_in"]:
                     st.session_state.update({"logged_in": True, "current_user": u, "via_telegram": False})
                     st.success(f"🎉 Аккаунт '{u}' успешно создан!")
                     st.rerun()
+                    
+        # --- СТИЛЬНАЯ КНОПКА LOGIN VIA TELEGRAM ---
+        st.write("<div style='text-align: center; margin: 15px 0; color: #64748b;'>или</div>", unsafe_allow_html=True)
+        
+        components.html(
+            """
+            <div id="btn-container" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 75px;">
+                <button id="tg-login-btn" style="
+                    background-color: #24A1DE; 
+                    color: white; 
+                    border: none; 
+                    border-radius: 10px; 
+                    padding: 12px 24px; 
+                    font-weight: bold; 
+                    font-size: 16px;
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; 
+                    cursor: pointer; 
+                    display: inline-flex; 
+                    align-items: center; 
+                    gap: 10px; 
+                    width: 100%; 
+                    max-width: 320px;
+                    justify-content: center; 
+                    box-shadow: 0 4px 15px rgba(36, 161, 222, 0.4);
+                    transition: all 0.2s ease;
+                ">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="m22 2-7 20-4-9-9-4Z"></path>
+                        <path d="M22 2 11 13"></path>
+                    </svg>
+                    Войти через Telegram
+                </button>
+                <div id="status" style="color: #ef4444; margin-top: 10px; font-family: sans-serif; font-size: 13px; font-weight: 500;"></div>
+            </div>
+
+            <script>
+                // Попытка динамически загрузить скрипт SDK Telegram
+                try {
+                    if (!window.parent.Telegram) {
+                        const script = window.parent.document.createElement('script');
+                        script.src = 'https://telegram.org/js/telegram-web-app.js';
+                        window.parent.document.head.appendChild(script);
+                    }
+                } catch (e) {
+                    if (!window.Telegram) {
+                        const script = document.createElement('script');
+                        script.src = 'https://telegram.org/js/telegram-web-app.js';
+                        document.head.appendChild(script);
+                    }
+                }
+
+                const btn = document.getElementById('tg-login-btn');
+                const statusDiv = document.getElementById('status');
+
+                btn.addEventListener('click', () => {
+                    btn.disabled = true;
+                    btn.style.opacity = '0.7';
+                    statusDiv.innerText = "Инициализация профиля...";
+                    
+                    try {
+                        const tg = (window.parent && window.parent.Telegram) || window.Telegram;
+                        if (tg && tg.WebApp && tg.WebApp.initDataUnsafe) {
+                            tg.WebApp.ready();
+                            tg.WebApp.expand();
+
+                            const user = tg.WebApp.initDataUnsafe.user;
+                            if (user) {
+                                const username = user.username || user.first_name || "tg_user";
+                                
+                                let parentUrl;
+                                try {
+                                    parentUrl = new URL(window.parent.location.href);
+                                } catch (corsErr) {
+                                    parentUrl = new URL(document.referrer || window.location.href);
+                                }
+
+                                parentUrl.searchParams.set("tg_user", username);
+                                parentUrl.searchParams.set("tg_ref", "telegram");
+                                
+                                statusDiv.style.color = "#10b981";
+                                statusDiv.innerText = "Успешная авторизация! Перенаправление...";
+                                window.parent.location.replace(parentUrl.href);
+                            } else {
+                                btn.disabled = false;
+                                btn.style.opacity = '1';
+                                statusDiv.innerText = "Ошибка: Запустите приложение из Telegram!";
+                            }
+                        } else {
+                            btn.disabled = false;
+                            btn.style.opacity = '1';
+                            statusDiv.innerText = "Ошибка: Telegram WebApp не обнаружен!";
+                        }
+                    } catch (err) {
+                        btn.disabled = false;
+                        btn.style.opacity = '1';
+                        statusDiv.innerText = "Сбой соединения с Telegram: " + err.message;
+                    }
+                });
+            </script>
+            """,
+            height=100,
+        )
     st.stop()
 
 # ----------------- ОСНОВНОЙ ИНТЕРФЕЙС ПРИЛОЖЕНИЯ -----------------
