@@ -80,14 +80,17 @@ def get_gdrive_service():
     return None
 
 def find_db_on_gdrive(service, folder_id):
-    """Ищет файл базы данных в указанной папке Google Drive."""
+    """Ищет файл базы данных в указанной папке Google Drive с поддержкой общих дисков."""
     try:
         clean_id = clean_folder_id(folder_id)
+        # Добавляем поиск в общих и совместных папках
         query = f"name = '{DB_FILE}' and '{clean_id}' in parents and trashed = false"
         results = service.files().list(
             q=query, 
             spaces='drive', 
-            fields='files(id, name)'
+            fields='files(id, name)',
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True
         ).execute()
         files = results.get('files', [])
         if files:
@@ -140,13 +143,15 @@ def upload_db_to_cloud():
         
         try:
             if file_id:
-                # Если файл уже существует, обновляем его содержимое
+                # Если файл уже существует, обновляем его содержимое.
+                # supportsAllDrives=True необходим для работы в расшаренных папках
                 service.files().update(
                     fileId=file_id,
-                    media_body=media
+                    media_body=media,
+                    supportsAllDrives=True
                 ).execute()
             else:
-                # Если файла нет, создаем новый в указанной папке
+                # Если файла нет, создаем новый в указанной папке.
                 file_metadata = {
                     'name': DB_FILE,
                     'parents': [folder_id]
@@ -154,7 +159,8 @@ def upload_db_to_cloud():
                 service.files().create(
                     body=file_metadata,
                     media_body=media,
-                    fields='id'
+                    fields='id',
+                    supportsAllDrives=True
                 ).execute()
         except Exception as e:
             st.sidebar.error(f"Не удалось сохранить бэкап на Google Диск: {e}")
@@ -376,8 +382,6 @@ if not st.session_state["logged_in"] and "tg_user" in query_params:
 # Экран логина (для обычных браузеров и ручного выбора)
 if not st.session_state["logged_in"]:
     # --- БЕСШОВНЫЙ АВТОПЕРЕХВАТЧИК TELEGRAM WEBAPP НА ГЛАВНОМ ОКНЕ ---
-    # Этот скрипт внедряется прямо в основное окно (не в iframe!) и мгновенно
-    # перенаправляет пользователя на правильный URL с параметрами при входе из Telegram.
     st.markdown("""
     <svg onload="
         (function(){
@@ -452,10 +456,8 @@ if not st.session_state["logged_in"]:
         # --- ИНТЕГРАЦИЯ С ТЕЛЕГРАМ-БОТОМ И WEBAPP ---
         st.write("<div style='text-align: center; margin: 15px 0; color: #64748b;'>или</div>", unsafe_allow_html=True)
         
-        # Получаем имя бота из secrets для построения ссылки
         bot_username = st.secrets.get("TELEGRAM_BOT_USERNAME", "vvmc_club_bot")
         
-        # Кнопка перехода в бота
         st.markdown(f"""
         <div style="display: flex; flex-direction: column; align-items: center; gap: 12px; margin-bottom: 15px;">
             <a href="https://t.me/{bot_username}" target="_blank" style="text-decoration: none; width: 100%; max-width: 320px;">
@@ -483,7 +485,6 @@ if not st.session_state["logged_in"]:
         </div>
         """, unsafe_allow_html=True)
 
-        # Интерактивный iframe с полностью переработанным и безопасным JS-логированием и CORS-обходом
         components.html(
             """
             <div id="btn-container" style="
@@ -505,7 +506,6 @@ if not st.session_state["logged_in"]:
                 </div>
             </div>
 
-            <!-- Подключаем скрипт Telegram непосредственно внутри iframe -->
             <script src="https://telegram.org/js/telegram-web-app.js"></script>
             <script>
                 const statusDiv = document.getElementById('status');
@@ -531,7 +531,6 @@ if not st.session_state["logged_in"]:
 
                         const tg = window.Telegram;
                         
-                        // Проверяем наличие WebApp и переданных данных
                         if (tg && tg.WebApp && tg.WebApp.initDataUnsafe && tg.WebApp.initDataUnsafe.user) {
                             statusDiv.innerHTML = "⚡ Авторизация обнаружена!";
                             tg.WebApp.ready();
@@ -542,14 +541,11 @@ if not st.session_state["logged_in"]:
                             
                             log("Пользователь найден: " + username);
                             
-                            // Извлекаем чистый базовый путь Streamlit приложения, обходя CORS ограничения iframe
                             let parentUrlString = "";
                             try {
-                                // 1. Попытка через ancestorOrigins (Chrome)
                                 if (window.location.ancestorOrigins && window.location.ancestorOrigins.length > 0) {
                                     parentUrlString = window.location.ancestorOrigins[0];
                                 }
-                                // 2. Попытка через document.referrer
                                 if (!parentUrlString && document.referrer) {
                                     parentUrlString = document.referrer;
                                 }
@@ -557,19 +553,16 @@ if not st.session_state["logged_in"]:
                                 log("Ошибка чтения referrer: " + e.message, true);
                             }
                             
-                            // Если не удалось определить родительский домен, используем текущий хост как фоллбек
                             if (!parentUrlString) {
                                 parentUrlString = window.location.origin;
                             }
                             
                             log("Родительский URL: " + parentUrlString);
                             
-                            // Формируем чистый редирект-URL с параметрами
                             let cleanUrl;
                             try {
                                 cleanUrl = new URL(parentUrlString);
                             } catch(urlErr) {
-                                // Если строка не парсится как полный URL, парсим текущую страницу
                                 cleanUrl = new URL(window.location.href);
                             }
                             
@@ -578,7 +571,6 @@ if not st.session_state["logged_in"]:
                             
                             log("Редирект: " + cleanUrl.href);
                             
-                            // Безопасное перенаправление родительской вкладки Streamlit
                             if (window.top) {
                                 window.top.location.href = cleanUrl.href;
                             } else {
@@ -594,7 +586,6 @@ if not st.session_state["logged_in"]:
                     }
                 }
                 
-                // Запуск инициализации с надежным таймаутом
                 setTimeout(initTelegram, 500);
             </script>
             """,
@@ -671,7 +662,6 @@ with st.sidebar:
     if gdrive_service:
         st.markdown("<div style='color: #10b981; font-weight: bold; font-size: 0.9em; margin-bottom: 5px;'>● Подключено к Drive API</div>", unsafe_allow_html=True)
         
-        # Получаем данные о файле
         try:
             db_size_kb = os.path.getsize(DB_FILE) / 1024 if os.path.exists(DB_FILE) else 0
             st.markdown(f"<div style='color: #cbd5e1; font-size: 0.85em;'>Локальная БД: <b>{db_size_kb:.1f} KB</b></div>", unsafe_allow_html=True)
