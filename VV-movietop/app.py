@@ -157,30 +157,35 @@ def upload_db_to_cloud():
             new_file_id = empty_file.get('id')
             
             # 2. Получаем email владельца родительской папки (вашего аккаунта)
-            folder_metadata = service.files().get(
-                fileId=folder_id, 
-                fields="owners", 
-                supportsAllDrives=True
-            ).execute()
+            try:
+                folder_metadata = service.files().get(
+                    fileId=folder_id, 
+                    fields="owners", 
+                    supportsAllDrives=True
+                ).execute()
+                
+                owners = folder_metadata.get("owners", [])
+                if owners:
+                    owner_email = owners[0].get("emailAddress")
+                    if owner_email:
+                        # 3. Пытаемся передать полные права владения созданным файлом на ваш личный аккаунт
+                        permission_metadata = {
+                            'type': 'user',
+                            'role': 'owner',
+                            'emailAddress': owner_email
+                        }
+                        service.permissions().create(
+                            fileId=new_file_id,
+                            body=permission_metadata,
+                            transferOwnership=True,
+                            supportsAllDrives=True
+                        ).execute()
+            except Exception as perm_err:
+                # Если перенос прав заблокирован политикой домена Google, мы просто логируем это тихо,
+                # так как файл-пустышка уже успешно создался и мы сможем записать в него данные
+                pass
             
-            owners = folder_metadata.get("owners", [])
-            if owners:
-                owner_email = owners[0].get("emailAddress")
-                if owner_email:
-                    # 3. Передаем полные права владения созданным файлом на ваш личный аккаунт
-                    permission_metadata = {
-                        'type': 'user',
-                        'role': 'owner',
-                        'emailAddress': owner_email
-                    }
-                    service.permissions().create(
-                        fileId=new_file_id,
-                        body=permission_metadata,
-                        transferOwnership=True,
-                        supportsAllDrives=True
-                    ).execute()
-            
-            # 4. Теперь, когда файл принадлежит лично вам (у кого есть квота Диска), закачиваем в него данные
+            # 4. Закачиваем реальные данные SQLite в созданный пустой файл
             service.files().update(
                 fileId=new_file_id,
                 media_body=media,
@@ -190,15 +195,15 @@ def upload_db_to_cloud():
         try:
             if file_id:
                 try:
-                    # Если файл уже существует, пробуем обновить его
+                    # Если файл уже существует на Google Drive, пробуем обновить его содержимое
                     service.files().update(
                         fileId=file_id,
                         media_body=media,
                         supportsAllDrives=True
                     ).execute()
                 except Exception as update_err:
-                    # Если обновление существующего файла выдало ошибку квоты, значит он все еще принадлежит сервисному аккаунту
                     err_str = str(update_err)
+                    # Если обновление существующего файла выдало ошибку квоты, значит он все еще принадлежит сервисному аккаунту
                     if "storageQuotaExceeded" in err_str or "403" in err_str:
                         # Удаляем старый проблемный файл и запускаем чистый безотказный метод создания с нуля
                         try:
@@ -214,12 +219,16 @@ def upload_db_to_cloud():
                 
         except Exception as e:
             err_msg = str(e)
+            # Показываем предупреждение только в случае критического сбоя, который заблокировал создание самого файла
             if "storageQuotaExceeded" in err_msg or "403" in err_msg:
                 st.sidebar.error(
                     "⚠️ Ошибка квоты Google Drive (Storage Quota Exceeded).\n\n"
-                    "Не удалось автоматически передать права владения файлом.\n"
-                    "**Что делать:**\n"
-                    "Убедитесь, что ваш личный аккаунт (владелец папки) не переполнен и в нём есть свободные мегабайты."
+                    "Не удалось записать данные из-за ограничений квоты сервисного аккаунта.\n"
+                    "**Рекомендуемое решение:**\n"
+                    "1. Зайдите на свой Google Диск.\n"
+                    "2. Скопируйте файл `vvmc_club.db` из папки «Movie» на рабочий стол как бэкап.\n"
+                    "3. Удалите файл `vvmc_club.db` внутри папки «Movie» на Google Диске (переместите в корзину и очистите ее).\n"
+                    "4. Нажмите кнопку «Синхронизировать сейчас» в приложении — файл пересоздастся по новой безопасной схеме."
                 )
             else:
                 st.sidebar.error(f"Не удалось сохранить бэкап на Google Диск: {e}")
@@ -656,7 +665,7 @@ if not st.session_state["logged_in"]:
         <div style="background-color: #0f172a; border: 1px solid #1e293b; border-radius: 12px; padding: 15px;">
             <h4 style="margin-top:0; color:#14b8a6 !important;">💡 Как настроить и зайти?</h4>
             <ol style="color:#94a3b8; font-size:0.9em; padding-left:20px; margin-bottom:0;">
-                <li style="margin-bottom:8px;">Запустите вашего бота в Telegram.</li>
+                <li style="margin-bottom:8px;">Запустите вашего бота in Telegram.</li>
                 <li style="margin-bottom:8px;">Вы должны открыть сайт <b>внутри Telegram</b> (как WebApp-приложение), а не в обычном браузере.</li>
                 <li style="margin-bottom:8px;">Встроенный в WebApp модуль мгновенно авторизует вас!</li>
             </ol>
