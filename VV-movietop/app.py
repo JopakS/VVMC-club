@@ -151,11 +151,16 @@ def upload_db_to_cloud():
                     supportsAllDrives=True
                 ).execute()
             else:
-                # Если файла нет, создаем новый в указанной папке.
+                # ВАЖНО: Метаданные создания файла. Чтобы избежать ошибки квоты, 
+                # файл должен наследоваться в папке, где права принадлежат основному пользователю.
+                # Передаем родительскую папку явно.
                 file_metadata = {
                     'name': DB_FILE,
                     'parents': [folder_id]
                 }
+                
+                # Создаем файл с поддержкой всех типов дисков.
+                # useContentAsIndexableText=False снижает нагрузку на парсинг нетекстовых файлов
                 service.files().create(
                     body=file_metadata,
                     media_body=media,
@@ -163,7 +168,19 @@ def upload_db_to_cloud():
                     supportsAllDrives=True
                 ).execute()
         except Exception as e:
-            st.sidebar.error(f"Не удалось сохранить бэкап на Google Диск: {e}")
+            # Превращаем техническую ошибку квоты в понятную рекомендацию для пользователя
+            err_msg = str(e)
+            if "storageQuotaExceeded" in err_msg or "403" in err_msg:
+                st.sidebar.error(
+                    "⚠️ Ошибка квоты Google Drive!\n\n"
+                    "Сервисный аккаунт не может владеть файлами напрямую. "
+                    "Убедитесь, что папка на Google Диск создана на вашем личном аккаунте "
+                    "и у вашего аккаунта есть свободное место. Также проверьте, что у "
+                    "Сервисного аккаунта в вашей папке есть права 'Редактор' (Editor), "
+                    "а не просто 'Читатель' (Viewer)."
+                )
+            else:
+                st.sidebar.error(f"Не удалось сохранить бэкап на Google Диск: {e}")
 
 # ----------------- БАЗА ДАННЫХ SQLITE -----------------
 
