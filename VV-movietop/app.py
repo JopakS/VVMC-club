@@ -129,7 +129,7 @@ def download_db_from_cloud():
             st.sidebar.info("Файл базы данных не найден на Google Диске. Будет создан новый при изменениях.")
 
 def upload_db_to_cloud():
-    """Загружает (или обновляет) локальную базу данных на Google Drive."""
+    """Загружает (или обновляет) локальную базу данных на Google Drive с обходом ошибки квоты."""
     service = get_gdrive_service()
     if service and "gdrive" in st.secrets and os.path.exists(DB_FILE):
         raw_folder_id = st.secrets["gdrive"].get("folder_id")
@@ -143,41 +143,72 @@ def upload_db_to_cloud():
         
         try:
             if file_id:
-                # Если файл уже существует, обновляем его содержимое.
-                # supportsAllDrives=True необходим для работы в расшаренных папках
+                # Если файл уже существует, пробуем его обновить
                 service.files().update(
                     fileId=file_id,
                     media_body=media,
                     supportsAllDrives=True
                 ).execute()
             else:
-                # ВАЖНО: Метаданные создания файла. Чтобы избежать ошибки квоты, 
-                # файл должен наследоваться в папке, где права принадлежат основному пользователю.
-                # Передаем родительскую папку явно.
+                # Метаданные создания файла
                 file_metadata = {
                     'name': DB_FILE,
                     'parents': [folder_id]
                 }
                 
-                # Создаем файл с поддержкой всех типов дисков.
-                # useContentAsIndexableText=False снижает нагрузку на парсинг нетекстовых файлов
-                service.files().create(
+                # Создаем файл в папке
+                new_file = service.files().create(
                     body=file_metadata,
                     media_body=media,
-                    fields='id',
+                    fields='id, owners',
                     supportsAllDrives=True
                 ).execute()
+                
+                new_file_id = new_file.get('id')
+                
+                # --- АВТОМАТИЧЕСКИЙ ОБХОД КВОТЫ (ПЕРЕДАЧА ПРАВ ВЛАДЕНИЯ) ---
+                # Получаем email владельца родительской папки (вашего личного аккаунта), чтобы сделать его владельцем файла
+                try:
+                    folder_metadata = service.files().get(
+                        fileId=folder_id, 
+                        fields="owners", 
+                        supportsAllDrives=True
+                    ).execute()
+                    
+                    owners = folder_metadata.get("owners", [])
+                    if owners:
+                        owner_email = owners[0].get("emailAddress")
+                        if owner_email:
+                            # Передаем владение файлом владельцу папки.
+                            # Теперь файл будет расходовать личную квоту владельца папки, а не сервис-аккаунта!
+                            permission_metadata = {
+                                'type': 'user',
+                                'role': 'owner',
+                                'emailAddress': owner_email
+                            }
+                            service.permissions().create(
+                                fileId=new_file_id,
+                                body=permission_metadata,
+                                transferOwnership=True,
+                                supportsAllDrives=True
+                            ).execute()
+                except Exception as owner_err:
+                    # Логируем ошибку передачи прав, но не прерываем работу, если файл всё-таки создался
+                    st.sidebar.warning(f"Предупреждение по оптимизации квоты: {owner_err}")
+                    
         except Exception as e:
-            # Превращаем техническую ошибку квоты в понятную рекомендацию для пользователя
             err_msg = str(e)
+            # Если возникла техническая ошибка нехватки квоты при обновлении или создании
             if "storageQuotaExceeded" in err_msg or "403" in err_msg:
                 st.sidebar.error(
-                    "⚠️ Ошибка квоты Google Drive!\n\n"
-                    "Сервисный аккаунт не может владеть файлами напрямую. "
-                    "Убедитесь, что папка на Google Диск создана на вашем личном аккаунте "
-                    "и у вашего аккаунта есть свободное место. Также проверьте, что у "
-                    "Сервисного аккаунта в вашей папке есть права 'Редактор' (Editor), "
-                    "а не просто 'Читатель' (Viewer)."
+                    "⚠️ Ошибка квоты Google Drive (Storage Quota Exceeded).\n\n"
+                    "Диск сервисного аккаунта переполнен (квота 0 байт).\n"
+                    "**Как исправить:**\n"
+                    "1. Перейдите в настройки доступа вашей папки «Movie».\n"
+                    "2. Нажмите на выпадающий список рядом с сервисным аккаунтом и выберите **«Сделать владельцем» (Make owner)**, "
+                    "либо убедитесь, что вы создали эту папку на аккаунте, где есть свободное место (например, guifk.29@gmail.com).\n"
+                    "3. Если сделать владельцем напрямую через интерфейс нельзя, скопируйте базу данных, удалите старую папку, "
+                    "создайте новую папку и предоставьте сервисному аккаунту права **Редактора** повторно."
                 )
             else:
                 st.sidebar.error(f"Не удалось сохранить бэкап на Google Диск: {e}")
